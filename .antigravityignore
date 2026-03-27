@@ -1,0 +1,27 @@
+.git
+__pycache__
+*.pyc
+.env
+.venv
+venv
+node_modules
+dist
+build
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+env/
+.venv/
+
+# IDE и окружение
+.idea/
+.vscode/
+.env
+
+# Базы данных и логи (на случай локального тестирования)
+dump.rdb
+*.log
