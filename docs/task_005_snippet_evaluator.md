@@ -61,13 +61,19 @@ def format_snippets_for_llm(snippets: list[SearchSnippet]) -> str:
 ### Шаг 3: Вызов API и парсинг
 
 ```python
+from app.core.llm import llm_provider
+
 async def evaluate_snippets(goal: str, snippets: list[SearchSnippet]) -> list[str]:
     formatted = format_snippets_for_llm(snippets)
-    
     prompt = f"Цель: {goal}\n\nСниппеты:\n{formatted}"
     
-    response = await call_gemini(prompt, system=SYSTEM_PROMPT)
-    raw_urls = parse_selected_urls(response)
+    # Использование абстрактного провайдера
+    response_text = await llm_provider.generate_json(
+        prompt=prompt,
+        system_prompt=SYSTEM_PROMPT
+    )
+    
+    raw_urls = parse_selected_urls(response_text)
     
     # Анти-галлюцинация: оставить только URL, реально присутствующие во входном массиве
     valid_input_urls = {s.url for s in snippets}
@@ -78,7 +84,6 @@ async def evaluate_snippets(goal: str, snippets: list[SearchSnippet]) -> list[st
         logger.warning(f"LLM выдумала {len(hallucinated)} URL, они отброшены: {hallucinated}")
     
     return verified
-```
 
 ---
 

@@ -103,6 +103,8 @@ def format_context(context: dict[str, str | None]) -> str:
 ### Вызов API
 
 ```python
+from app.core.llm import llm_provider
+
 async def judge(inp: JudgeInput) -> JudgeOutput:
     is_final = inp.current_iteration >= inp.max_iterations
     
@@ -112,23 +114,15 @@ async def judge(inp: JudgeInput) -> JudgeOutput:
         is_final=is_final
     )
     
-    user_message = f"""
-Запрос: {inp.original_query}
-Цель: {inp.goal}
-
-Собранные материалы:
-{format_context(inp.context)}
-"""
+    user_message = f"Запрос: {inp.original_query}\nЦель: {inp.goal}\n\nСобранные материалы:\n{format_context(inp.context)}"
     
-    response = await call_gemini(
-        user_message,
-        system=system,
-        model=GEMINI_MODEL,
-        response_mime_type="application/json"
+    # Использование абстрактного провайдера
+    response_text = await llm_provider.generate_json(
+        prompt=user_message,
+        system_prompt=system
     )
     
-    return parse_judge_output(response)
-```
+    return parse_judge_output(response_text)
 
 ### Валидация ответа
 
