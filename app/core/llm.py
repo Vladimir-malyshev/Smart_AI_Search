@@ -1,5 +1,8 @@
 import os
 import re
+import time
+import asyncio
+import time
 import logging
 from typing import Optional, Dict, Any
 
@@ -44,17 +47,13 @@ class LLMProvider:
     async def generate_json(self, prompt: str, system_prompt: str, model_name: str) -> str:
         """
         Генерирует JSON-ответ через выбранного провайдера.
-
-        ВАЖНО: Gemma-3 (gemma-3-27b-it) НЕ поддерживает:
-          - system_instruction в GenerateContentConfig
-          - response_mime_type="application/json"
-        Поэтому для Gemini-провайдера оба промпта объединяются в один user-prompt,
-        а JSON извлекается из сырого текста ответа через регулярное выражение.
+        Включает автоматический retry с экспоненциальным backoff при 429.
         """
+        max_retries = int(os.environ.get("LLM_MAX_RETRIES", 4))
+
         if self.provider == "gemini":
             from google.genai import types
 
-            # Объединяем system + user prompt, явно требуем чистый JSON в ответе
             combined_prompt = (
                 f"System Instruction:\n{system_prompt}\n\n"
                 f"User Question:\n{prompt}\n\n"
@@ -62,17 +61,47 @@ class LLMProvider:
                 "Do not include any explanation, markdown, or code fences. "
                 "Output raw JSON and nothing else."
             )
-
             config = types.GenerateContentConfig(temperature=0.3)
 
-            response = await self.gemini_client.aio.models.generate_content(
-                model=model_name,
-                contents=combined_prompt,
-                config=config,
-            )
-            return self._extract_json(response.text or "")
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    start_time = time.monotonic()
+                    response = await self.gemini_client.aio.models.generate_content(
+                        model=model_name,
+                        contents=combined_prompt,
+                        config=config,
+                    )
+                    duration = time.monotonic() - start_time
+                    result = self._extract_json(response.text or "")
+                    logger.info(f"[llm] Gemini {model_name} responded in {duration:.2f}s. Response: {result[:200]}...")
+                    return result
+                except Exception as e:
+                    last_exc = e
+                    err_str = str(e)
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        # Пытаемся извлечь retryDelay из сообщения об ошибке
+                        delay_match = re.search(r'retryDelay.*?(\d+)s', err_str)
+                        if delay_match:
+                            base_wait = float(delay_match.group(1)) + 2.0
+                        else:
+                            # Экспоненциальный backoff: 10s, 20s, 40s, ...
+                            base_wait = 10.0 * (2 ** (attempt - 1))
+                        if attempt < max_retries:
+                            logger.warning(
+                                f"[llm] Gemini 429 RESOURCE_EXHAUSTED (attempt {attempt}/{max_retries}). "
+                                f"Waiting {base_wait:.0f}s before retry..."
+                            )
+                            await asyncio.sleep(base_wait)
+                        else:
+                            logger.error(f"[llm] Gemini 429: exhausted {max_retries} retries for model={model_name}.")
+                    else:
+                        # Не квотная ошибка — не ретраим
+                        raise
+            raise last_exc
 
         elif self.provider == "openai":
+            start_time = time.monotonic()
             response = await self.openai_client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -82,7 +111,10 @@ class LLMProvider:
                 response_format={"type": "json_object"},
                 temperature=0.3,
             )
-            return response.choices[0].message.content
+            duration = time.monotonic() - start_time
+            result = response.choices[0].message.content
+            logger.info(f"[llm] OpenAI {model_name} responded in {duration:.2f}s. Response: {result[:200]}...")
+            return result
 
 
 # Default instance helper — ленивая инициализация singleton

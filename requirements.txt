@@ -9,3 +9,4 @@ python-dotenv
 aiohttp
 duckduckgo-search
 beautifulsoup4
+pyyaml

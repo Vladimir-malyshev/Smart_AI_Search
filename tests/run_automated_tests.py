@@ -66,6 +66,7 @@ async def send_research_request(session: aiohttp.ClientSession, endpoint: str, t
                 "status": data.get("status", "unknown"),
                 "iterations_used": data.get("iterations_used", 0),
                 "elapsed_sec": data.get("elapsed_sec", time.monotonic() - start_time),
+                "answer": data.get("answer", ""),
                 "answer_length": len(data.get("answer", "")),
                 "sources_count": len(data.get("sources", []))
             }
@@ -87,7 +88,7 @@ async def send_research_request(session: aiohttp.ClientSession, endpoint: str, t
             "error": str(e)
         }
 
-async def run_all_tests(endpoint: str, cases: List[TestCase]):
+async def run_all_tests(endpoint: str, cases: List[TestCase], pause_sec: int = 20):
     total = len(cases)
     success_count = 0
     total_time = 0.0
@@ -99,6 +100,11 @@ async def run_all_tests(endpoint: str, cases: List[TestCase]):
     
     async with aiohttp.ClientSession() as session:
         for idx, case in enumerate(cases, 1):
+            # Пауза перед стартом каждого теста, кроме первого
+            if idx > 1:
+                logger.info(f"Waiting {pause_sec}s before starting next test (TPM protection)...")
+                await asyncio.sleep(pause_sec)
+
             logger.info(f"--- Test {idx}/{total} [{case['level'].upper()}] ---")
             logger.info(f"Query: {case['query']}")
             logger.info(f"Goal:  {case['goal']}")
@@ -108,29 +114,40 @@ async def run_all_tests(endpoint: str, cases: List[TestCase]):
             status = result.get("status")
             elapsed = result.get("elapsed_sec", 0.0)
             iters = result.get("iterations_used", 0)
-            
             logger.info(f"Result Status: {status}")
             logger.info(f"Iterations:    {iters}")
             logger.info(f"Time Taken:    {elapsed:.2f}s")
             logger.info(f"Answer Size:   {result.get('answer_length', 0)} chars")
             logger.info(f"Sources Used:  {result.get('sources_count', 0)}")
             
+            if result.get("answer"):
+                # Мы больше не выводим ответ в консоль, так как он может быть очень длинным (Tool Retrieval Mode)
+                pass
+            
             if status == "complete":
                 success_count += 1
                 total_time += elapsed
                 total_iterations += iters
+                
+                if result.get("answer"):
+                    os.makedirs("logs/results", exist_ok=True)
+                    slug = "".join(c if c.isalnum() else "_" for c in case['query'].lower())[:30]
+                    filename = f"logs/results/test_{idx:02d}_{slug}.md"
+                    try:
+                        with open(filename, "w", encoding="utf-8") as f:
+                            f.write(f"# Query: {case['query']}\n")
+                            f.write(f"# Goal: {case['goal']}\n\n")
+                            f.write(result["answer"])
+                        logger.info(f"Saved extracted result to {filename}")
+                    except Exception as e:
+                        logger.error(f"Failed to save result to file: {e}")
             else:
                 logger.warning(f"Test failed with status: {status}")
                 if "error" in result:
                     logger.error(f"Error details: {result['error']}")
             
             logger.info("-" * 60)
-            
-            # Критическое правило: обязательная пауза после каждого запроса (для избежания бана)
-            if idx < total:
-                logger.info("Waiting 5 seconds before next request (Anti-ban)...")
-                await asyncio.sleep(5)
-                
+
     # Выводим финальную статистику
     logger.info("=" * 60)
     logger.info("TEST SUITE SUMMARY")
@@ -151,6 +168,7 @@ def main():
     parser = argparse.ArgumentParser(description="Deep Research API Test Runner")
     parser.add_argument("--url", default="http://127.0.0.1:8000/api/v1/research", help="API Endpoint URL")
     parser.add_argument("--cases", default="tests/test_cases.json", help="Path to test cases JSON file")
+    parser.add_argument("--pause", type=int, default=20, help="Pause in seconds before each test (except first), default: 20")
     
     args = parser.parse_args()
     
@@ -162,7 +180,7 @@ def main():
         return
         
     try:
-        asyncio.run(run_all_tests(args.url, cases))
+        asyncio.run(run_all_tests(args.url, cases, pause_sec=args.pause))
     except KeyboardInterrupt:
         logger.info("Test execution interrupted by user.")
 

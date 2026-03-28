@@ -1,5 +1,7 @@
 import os
 import sys
+from dotenv import load_dotenv
+load_dotenv()
 from pathlib import Path
 # Добавляем корень проекта в sys.path, чтобы можно было запускать файл напрямую из IDE
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -11,8 +13,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from app.modules.harvester import harvester_loop, run_harvest_cycle
-from app.modules.query_expansion import expand_query
 from app.modules.execution_engine import execute_all
 from app.modules.snippet_evaluator import evaluate_snippets
 from app.modules.jina_reader import fetch_all
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Config
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", 3))
-GLOBAL_TIMEOUT_SEC = float(os.environ.get("GLOBAL_TIMEOUT_SEC", 45.0))
+GLOBAL_TIMEOUT_SEC = 200.0
 
 class ResearchRequest(BaseModel):
     query: str
@@ -47,18 +47,10 @@ class ResearchResponse(BaseModel):
     sources: List[str]
     elapsed_sec: float
 
-# Ensure the harvester fills up the node pool before serving traffic
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Launch background loop
-    logger.info("Starting Harvester background loop...")
-    harvester_task = asyncio.create_task(harvester_loop())
-    
+    # Harvester loop disabled as per task_011
     yield
-    
-    # Shutdown
-    logger.info("Shutting down Harvester...")
-    harvester_task.cancel()
 
 app = FastAPI(title="Smart AI Search API", lifespan=lifespan)
 
@@ -73,10 +65,10 @@ async def run_research_pipeline(query: str, goal: str) -> dict:
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"Research Pipeline Iteration {iteration}/{MAX_ITERATIONS} for query: {query[:30]}")
         
-        # 1. Expand Query
+        # 1. Initial Queries (Task 011: No expansion on Iteration 1)
         if current_queries is None:
-            current_queries = await expand_query(query, goal)
-            logger.info(f"AI Planner initial queries: {current_queries}")
+            current_queries = [query]
+            logger.info(f"Iteration 1: Using exact user query: {current_queries}")
             
         # 2. Execute parallel search
         snippets = await execute_all(current_queries)
@@ -106,20 +98,47 @@ async def run_research_pipeline(query: str, goal: str) -> dict:
         judge_result = await judge(judge_input)
         
         if judge_result.status == "complete":
+            useful_urls = judge_result.useful_urls
+            if not useful_urls:
+                logger.warning("Judge returned 'complete' but empty 'useful_urls'. Fallback to all sources.")
+                useful_urls = list(accumulated_context.keys())
+                
+            parts = []
+            for url in useful_urls:
+                content = accumulated_context.get(url)
+                if content:
+                    parts.append(f"### Источник: {url}\n{content}")
+                    
+            if not parts:
+                final_answer = "Собранные источники не содержат релевантного контента."
+            else:
+                final_answer = "\n\n".join(parts)
+                
+            logger.info(f"Pipeline Completed (Status: complete, Iterations: {iteration}, Useful URLs: {len(useful_urls)})")
+            
             return {
                 "status": "complete",
-                "answer": judge_result.final_answer or "Ответ был завершен, но текст пуст.",
+                "answer": final_answer,
                 "iterations_used": iteration,
-                "sources": list(accumulated_context.keys())
+                "sources": useful_urls
             }
             
         # Prepare for next iteration
         current_queries = judge_result.new_queries
         logger.info(f"Iteration {iteration} incomplete. New queries: {current_queries}")
         
+    logger.warning("Pipeline hit fallback return outside iteration loop.")
+    
+    parts = []
+    for url, content in accumulated_context.items():
+        if content:
+            parts.append(f"### Источник: {url}\n{content}")
+            
+    final_answer = "\n\n".join(parts) if parts else "Исчерпан лимит итераций пайплайна. Информации нет."
+    
     return {
         "status": "complete",
-        "answer": "Исчерпан лимит итераций пайплайна.",
+        "answer": final_answer,
         "iterations_used": MAX_ITERATIONS,
         "sources": list(accumulated_context.keys())
     }
@@ -150,6 +169,16 @@ async def research_endpoint(request: ResearchRequest):
         return ResearchResponse(
             status="timeout",
             answer="Превышено время ожидания. Анализ был прерван, так как сбор информации занял слишком много времени.",
+            iterations_used=-1,
+            sources=[],
+            elapsed_sec=elapsed
+        )
+    except Exception as e:
+        logger.error(f"Global Pipeline Error for query: {request.query}: {e}", exc_info=True)
+        elapsed = loop.time() - start_time
+        return ResearchResponse(
+            status="error",
+            answer=f"Произошла внутренняя ошибка при обработке запроса: {str(e)}",
             iterations_used=-1,
             sources=[],
             elapsed_sec=elapsed

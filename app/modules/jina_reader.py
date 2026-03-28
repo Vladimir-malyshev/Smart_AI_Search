@@ -41,7 +41,7 @@ def is_blocked_content(text: str) -> bool:
 
 async def fetch_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     """Fetches a single URL via Jina Reader API."""
-    
+    logger.info(f"Jina: Extracting content from {url}...")
     headers = {
         "Accept": "text/markdown"
     }
@@ -79,7 +79,8 @@ async def fetch_all(urls: List[str]) -> Dict[str, Optional[str]]:
     """Fetches multiple URLs in parallel with concurrency limit."""
     if not urls:
         return {}
-        
+    
+    logger.info(f"Jina: Fetching {len(urls)} URLs in parallel...")
     sem = asyncio.Semaphore(JINA_CONCURRENCY)
     
     # Keep session for all requests

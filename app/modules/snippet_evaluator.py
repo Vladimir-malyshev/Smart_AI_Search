@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import yaml
+from pathlib import Path
 from typing import List
 from app.core import llm
 from app.modules.execution_engine import SearchSnippet
@@ -11,30 +13,20 @@ logger = logging.getLogger(__name__)
 EVALUATOR_MAX_SELECTED = int(os.environ.get("EVALUATOR_MAX_SELECTED", 4))
 EVALUATOR_MIN_SELECTED = int(os.environ.get("EVALUATOR_MIN_SELECTED", 1))
 
-# Default model name for evaluator (can be overridden by environment)
+# Default model name for evaluator — строго Gemma (flash запрещён в этом модуле)
 provider = os.environ.get("LLM_PROVIDER", "gemini").lower()
 if provider == "openai":
     DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 else:
-    DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    DEFAULT_MODEL = os.environ.get("EVALUATOR_LLM_MODEL", "gemma-3-27b-it")
 
-SYSTEM_PROMPT = f"""
-Ты — информационный аналитик. Тебе дан список поисковых сниппетов и цель пользователя.
+config_path = Path(__file__).resolve().parent.parent / "config" / "prompts.yaml"
+with open(config_path, "r", encoding="utf-8") as f:
+    prompts_config = yaml.safe_load(f)
 
-Твоя задача: выбрать максимум {EVALUATOR_MAX_SELECTED} URL, которые с наибольшей 
-вероятностью содержат информацию для достижения цели.
-
-Правила отбора:
-- Отдавай предпочтение первичным источникам: официальная документация, исследования, 
-  новостные статьи от изданий, блоги экспертов
-- Строго игнорировать: Pinterest, агрегаторы без контента, кликбейт-заголовки, 
-  SEO-дорвеи ("скачать бесплатно", "топ 100 сайтов"), Reddit-треды без ответов
-
-Ответ строго в формате JSON, без пояснений:
-{{"selected_urls": ["https://...", "https://..."]}}
-
-Если ни один сниппет не релевантен — вернуть: {{"selected_urls": []}}
-""".strip()
+SYSTEM_PROMPT = prompts_config.get("snippet_evaluator_system", "").format(
+    EVALUATOR_MAX_SELECTED=EVALUATOR_MAX_SELECTED
+).strip()
 
 def format_snippets_for_llm(snippets: List[SearchSnippet]) -> str:
     """Formats a list of snippets into a numbered list for the prompt."""

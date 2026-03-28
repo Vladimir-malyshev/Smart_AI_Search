@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 import logging
 import aiohttp
@@ -15,6 +16,8 @@ class SearchSnippet:
 
 async def _search_jina(query: str) -> List[SearchSnippet]:
     """Search using Jina AI provider."""
+    start_time = time.monotonic()
+    logger.info(f"Searching Jina for: {query}")
     url = f"https://s.jina.ai/{query}"
     jina_api_key = os.environ.get("JINA_API_KEY", "")
     
@@ -49,6 +52,8 @@ async def _search_jina(query: str) -> List[SearchSnippet]:
     except Exception as e:
         logger.error(f"Error calling Jina API for query '{query}': {e}", exc_info=True)
         
+    duration = time.monotonic() - start_time
+    logger.info(f"Jina search for '{query}' took {duration:.2f}s")
     return snippets
 
 async def _search_tavily(query: str) -> List[SearchSnippet]:
@@ -62,6 +67,7 @@ async def _search_searxng(query: str) -> List[SearchSnippet]:
 async def execute_search(query: str) -> List[SearchSnippet]:
     """Route search to the selected provider. Defalut is Jina."""
     provider = os.environ.get("SEARCH_PROVIDER", "jina").lower()
+    logger.info(f"Routing query '{query}' to provider: {provider}")
     
     if provider == "tavily":
         return await _search_tavily(query)
@@ -75,7 +81,8 @@ async def execute_all(queries: List[str]) -> List[SearchSnippet]:
     """Execute search for multiple queries concurrently, flatten and deduplicate."""
     if not queries:
         return []
-        
+    
+    logger.info(f"Executing parallel search for {len(queries)} queries...")
     tasks = [execute_search(query) for query in queries]
     results_list = await asyncio.gather(*tasks, return_exceptions=True)
     

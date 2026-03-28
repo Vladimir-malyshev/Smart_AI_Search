@@ -2,6 +2,9 @@ import os
 import json
 import re
 import logging
+import asyncio
+import yaml
+from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from app.core import llm
@@ -9,11 +12,13 @@ from app.core import llm
 logger = logging.getLogger(__name__)
 
 # Model Configuration
+# Судья использует JUDGE_LLM_MODEL — отделён от оценщика.
+# По умолчанию gemini-2.5-flash-lite: допускает большой контекст и стоит дёшево.
 provider = os.environ.get("LLM_PROVIDER", "gemini").lower()
 if provider == "openai":
-    DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+    JUDGE_LLM_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 else:
-    DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemma-3-27b-it")
+    JUDGE_LLM_MODEL = os.environ.get("JUDGE_LLM_MODEL", "gemini-3.1-flash-lite-preview")
 
 @dataclass
 class JudgeInput:
@@ -26,7 +31,7 @@ class JudgeInput:
 @dataclass
 class JudgeOutput:
     status: str
-    final_answer: Optional[str]
+    useful_urls: List[str]
     missing_info: Optional[str]
     new_queries: List[str] = field(default_factory=list)
 
@@ -42,37 +47,24 @@ def format_context(context: Dict[str, Optional[str]]) -> str:
 
 def build_system_prompt(current_iteration: int, max_iterations: int, is_final: bool) -> str:
     """Builds the dynamic system prompt based on iteration context."""
-    base = f"""Ты — аналитик-синтезатор. Твоя задача — оценить собранные материалы и принять решение.
-
-Тебе дано:
-- Оригинальный запрос пользователя
-- Цель исследования
-- Собранные тексты источников
-- Номер текущей итерации: {current_iteration} из {max_iterations}
-
-Инструкция:
-
-Если собранного материала ДОСТАТОЧНО для достижения цели:
-  - Установи "status": "complete"
-  - Напиши детальный "final_answer" на основе источников
-  - "missing_info": null, "new_queries": []
-
-Если НЕДОСТАТОЧНО:
-  - Установи "status": "incomplete"  
-  - В "missing_info" опиши конкретно, чего не хватает
-  - В "new_queries" дай 2-3 новых поисковых запроса для восполнения пробелов"""
-    
-    if is_final:
-        base += """
-
-[СПЕЦИАЛЬНОЕ ПРАВИЛО — ТОЛЬКО ПРИ current_iteration == max_iterations]
-Это последняя попытка. Статус ОБЯЗАТЕЛЬНО "complete".
-Синтезируй лучший возможный ответ из имеющихся данных.
-Если по каким-то аспектам информации нет — честно укажи это в final_answer.
-Никогда не оставляй пользователя без ответа."""
+    config_path = Path(__file__).resolve().parent.parent / "config" / "prompts.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
+        prompts_config = yaml.safe_load(f)
         
-    base += "\n\nОтвет строго в формате JSON, без пояснений и преамбулы."
-    return base
+    base = prompts_config.get("ai_judge_system", "")
+    
+    final_attempt_rule = ""
+    if is_final:
+        final_attempt_rule = """
+[СПЕЦИАЛЬНОЕ ПРАВИЛО — ТОЛЬКО ПРИ current_iteration >= max_iterations]
+Это последняя попытка. Статус ОБЯЗАТЕЛЬНО \"complete\".
+Верни \"useful_urls\" с лучшими из имеющихся источников, даже если они не охватывают цель на 100%.
+"""
+    return base.format(
+        current_iteration=current_iteration, 
+        max_iterations=max_iterations, 
+        final_attempt_rule=final_attempt_rule
+    ).strip()
 
 def parse_judge_output(raw: str, inp: JudgeInput) -> JudgeOutput:
     """Parses LLM JSON and applies safety limits on iterations."""
@@ -103,19 +95,24 @@ def parse_judge_output(raw: str, inp: JudgeInput) -> JudgeOutput:
     if inp.current_iteration >= inp.max_iterations and status == "incomplete":
         logger.warning(f"AI-Judge returned 'incomplete' on max_iteration={inp.max_iterations}. Forcing 'complete' override.")
         status = "complete"
-        # Populate final_answer if missing since we bypass LLM completion
-        if not data.get("final_answer"):
-            data["final_answer"] = "Поиск достиг лимита итераций. Полную информацию собрать не удалось на основе найденных источников: " + str(data.get("missing_info", ""))
+
+    useful_urls = data.get("useful_urls", [])
+    if not isinstance(useful_urls, list):
+        useful_urls = []
+        
+    if status == "incomplete":
+        useful_urls = []
             
     return JudgeOutput(
         status=status,
-        final_answer=data.get("final_answer"),
+        useful_urls=useful_urls,
         missing_info=data.get("missing_info"),
         new_queries=data.get("new_queries", [])
     )
 
 async def judge(inp: JudgeInput) -> JudgeOutput:
-    """Evaluates search result context array via LLM layer."""
+    """Evaluates search result context array via LLM layer with retry on 429."""
+    logger.info(f"AI-Judge evaluating content (Iteration {inp.current_iteration}/{inp.max_iterations}), model={JUDGE_LLM_MODEL}...")
     is_final = inp.current_iteration >= inp.max_iterations
     
     system = build_system_prompt(
@@ -124,15 +121,46 @@ async def judge(inp: JudgeInput) -> JudgeOutput:
         is_final=is_final
     )
     
-    user_message = f"Запрос: {inp.original_query}\nЦель: {inp.goal}\n\nСобранные материалы:\n{format_context(inp.context)}"
+    # --- Локальное усечение контекста (Task 3) ---
+    # Создаём копию — исходный словарь inp.context НЕ изменяем!
+    JUDGE_MAX_CHARS_PER_SOURCE = int(os.environ.get("JUDGE_MAX_CHARS_PER_SOURCE", 6000))
+    TRUNCATION_MARKER = "\n\n...[УСЕЧЕНО ДЛЯ СУДЬИ]"
+    truncated_context: Dict[str, Optional[str]] = {}
+    for url, text in inp.context.items():
+        if text and len(text) > JUDGE_MAX_CHARS_PER_SOURCE:
+            truncated_context[url] = text[:JUDGE_MAX_CHARS_PER_SOURCE] + TRUNCATION_MARKER
+        else:
+            truncated_context[url] = text
+
+    user_message = f"Запрос: {inp.original_query}\nЦель: {inp.goal}\n\nСобранные материалы:\n{format_context(truncated_context)}"
     
-    try:
-        response_text = await llm.generate_json(
-            prompt=user_message,
-            system_prompt=system,
-            model_name=DEFAULT_MODEL
-        )
-        return parse_judge_output(response_text, inp)
-    except Exception as e:
-        logger.error(f"Error during AI-Judge execution: {e}")
-        raise
+    # Retry logic for 429 RESOURCE_EXHAUSTED with exponential backoff
+    max_retries = int(os.environ.get("LLM_MAX_RETRIES", 3))
+    retry_delay = float(os.environ.get("LLM_RETRY_DELAY_SEC", 30.0))
+    
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response_text = await llm.generate_json(
+                prompt=user_message,
+                system_prompt=system,
+                model_name=JUDGE_LLM_MODEL
+            )
+            return parse_judge_output(response_text, inp)
+        except Exception as e:
+            err_str = str(e)
+            last_exc = e
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                delay_match = re.search(r'retryDelay.*?(\d+)s', err_str)
+                wait = float(delay_match.group(1)) + 2.0 if delay_match else retry_delay
+                if attempt < max_retries:
+                    logger.warning(f"AI-Judge: 429 quota exceeded (attempt {attempt}/{max_retries}). Retrying in {wait:.0f}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                else:
+                    logger.error(f"AI-Judge: quota exceeded after {max_retries} retries. Giving up.")
+            else:
+                logger.error(f"Error during AI-Judge execution: {e}")
+            break
+
+    raise last_exc
