@@ -6,3 +6,6 @@ pydantic-settings
 google-generativeai
 httpx
 python-dotenv
+aiohttp
+duckduckgo-search
+beautifulsoup4

@@ -1,132 +1,99 @@
 import os
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import List, Tuple
 import aiohttp
-
-from app.modules.redis_manager import get_top_nodes, quarantine, add_score, reduce_score
+from dataclasses import dataclass
+from typing import List
 
 logger = logging.getLogger(__name__)
 
-SEARCH_TIMEOUT_FAST_SEC = float(os.environ.get("SEARCH_TIMEOUT_FAST_SEC", 1.0))
-SEARCH_TIMEOUT_SLOW_SEC = float(os.environ.get("SEARCH_TIMEOUT_SLOW_SEC", 2.0))
-SEARCH_TIMEOUT_HARD_SEC = float(os.environ.get("SEARCH_TIMEOUT_HARD_SEC", 5.0))
-SEARCH_FALLBACK_MAX_ATTEMPTS = int(os.environ.get("SEARCH_FALLBACK_MAX_ATTEMPTS", 2))
-
 @dataclass
 class SearchSnippet:
-    url: str
     title: str
+    url: str
     snippet: str
-    source_node: str
 
-async def assign_nodes(queries: list[str]) -> list[tuple[str, str]]:
-    top_nodes = await get_top_nodes(limit=len(queries) * 2)
-    if not top_nodes:
-        raise RuntimeError("Пул нод пуст: Redis недоступен или все ноды в карантине")
-        
-    assignments = []
-    for i, query in enumerate(queries):
-        node = top_nodes[i % len(top_nodes)]  # round-robin если нод меньше запросов
-        assignments.append((query, node))
-    return assignments
-
-async def update_reputation(node_url: str, elapsed_sec: float):
-    if elapsed_sec < SEARCH_TIMEOUT_FAST_SEC:
-        await add_score(node_url, 2.0)       # быстро — бонус
-    elif elapsed_sec > SEARCH_TIMEOUT_SLOW_SEC:
-        await reduce_score(node_url, 5.0)    # медленно — штраф
-    # в диапазоне [1.0, 2.0] сек — репутация не меняется
-
-def parse_snippets(data: dict, source_node: str) -> list[SearchSnippet]:
-    snippets = []
-    for item in data.get("results", []):
-        try:
-            url = item.get("url")
-            title = item.get("title")
-            content = item.get("content", "")
-            if not url or not title:
-                continue
-            snippets.append(SearchSnippet(
-                url=url, 
-                title=title, 
-                snippet=content, 
-                source_node=source_node
-            ))
-        except Exception as e:
-            logger.debug(f"Snippet parsing error: {e}")
-            continue
-    return snippets
-
-async def execute_search(query: str, node_url: str, attempt: int = 1) -> list[SearchSnippet]:
-    loop = asyncio.get_running_loop()
-    start_time = loop.time()
+async def _search_jina(query: str) -> List[SearchSnippet]:
+    """Search using Jina AI provider."""
+    url = f"https://s.jina.ai/{query}"
+    jina_api_key = os.environ.get("JINA_API_KEY", "")
     
+    headers = {
+        "Accept": "application/json"
+    }
+    if jina_api_key:
+        headers["Authorization"] = f"Bearer {jina_api_key}"
+        
+    snippets = []
     try:
         async with aiohttp.ClientSession() as session:
-            timeout = aiohttp.ClientTimeout(total=SEARCH_TIMEOUT_HARD_SEC)
-            async with session.get(
-                node_url,
-                params={"q": query, "format": "json"},
-                timeout=timeout
-            ) as resp:
-                if resp.status != 200:
-                    raise aiohttp.ClientResponseError(
-                        resp.request_info,
-                        resp.history,
-                        status=resp.status,
-                        message=f"HTTP Error {resp.status}"
-                    )
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    logger.warning(f"Jina API returned status {response.status} for query '{query}'")
+                    return snippets
+                    
+                data = await response.json()
+                items = data.get("data", [])
                 
-                data = await resp.json()
-                elapsed = loop.time() - start_time
-                
-                # Обратная связь по скорости
-                await update_reputation(node_url, elapsed)
-                
-                return parse_snippets(data, source_node=node_url)
-                
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.warning(f"Node {node_url} failed query '{query}', attempt {attempt}: {e.__class__.__name__}")
-        await quarantine(node_url)
+                for item in items:
+                    title = item.get("title", "")
+                    item_url = item.get("url", "")
+                    description = item.get("description", "")
+                    
+                    if item_url and title:
+                        snippets.append(SearchSnippet(
+                            title=title,
+                            url=item_url,
+                            snippet=description
+                        ))
+    except Exception as e:
+        logger.error(f"Error calling Jina API for query '{query}': {e}", exc_info=True)
         
-        if attempt < SEARCH_FALLBACK_MAX_ATTEMPTS:
-            fallback_nodes = await get_top_nodes(limit=attempt + 2)
-            next_node = next((n for n in fallback_nodes if n != node_url), None)
-            if next_node:
-                logger.info(f"Fallback to node {next_node} for query '{query}'")
-                return await execute_search(query, next_node, attempt + 1)
-                
-        logger.warning(f"Все попытки исчерпаны для запроса '{query}'")
-        return []
+    return snippets
 
-def deduplicate(snippets: list[SearchSnippet]) -> list[SearchSnippet]:
-    seen_urls = set()
-    result = []
-    for s in snippets:
-        if s.url not in seen_urls:
-            seen_urls.add(s.url)
-            result.append(s)
-    return result
+async def _search_tavily(query: str) -> List[SearchSnippet]:
+    """Stub for Tavily provider."""
+    return []
 
-async def execute_all(queries: list[str]) -> list[SearchSnippet]:
+async def _search_searxng(query: str) -> List[SearchSnippet]:
+    """Stub for SearXNG provider."""
+    return []
+
+async def execute_search(query: str) -> List[SearchSnippet]:
+    """Route search to the selected provider. Defalut is Jina."""
+    provider = os.environ.get("SEARCH_PROVIDER", "jina").lower()
+    
+    if provider == "tavily":
+        return await _search_tavily(query)
+    elif provider == "searxng":
+        return await _search_searxng(query)
+    else:
+        # Default or unknown provider falls back to jina
+        return await _search_jina(query)
+
+async def execute_all(queries: List[str]) -> List[SearchSnippet]:
+    """Execute search for multiple queries concurrently, flatten and deduplicate."""
     if not queries:
         return []
-    
-    assignments = await assign_nodes(queries)
-    
-    tasks = []
-    for query, node_url in assignments:
-        tasks.append(execute_search(query, node_url, attempt=1))
         
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [execute_search(query) for query in queries]
+    results_list = await asyncio.gather(*tasks, return_exceptions=True)
     
-    all_snippets = []
-    for res in results:
+    flat_results = []
+    for res in results_list:
         if isinstance(res, Exception):
-            logger.error(f"Unexpected error in execute_search: {res}")
+            logger.error(f"Search task raised an exception: {res}")
         elif isinstance(res, list):
-            all_snippets.extend(res)
+            flat_results.extend(res)
             
-    return deduplicate(all_snippets)
+    # Deduplicate by URL
+    unique_snippets = []
+    seen_urls = set()
+    
+    for snippet in flat_results:
+        url_norm = snippet.url.strip().lower()
+        if url_norm not in seen_urls:
+            seen_urls.add(url_norm)
+            unique_snippets.append(snippet)
+            
+    return unique_snippets

@@ -1,98 +1,97 @@
 import os
-os.environ["REDIS_URL"] = "redis://localhost:6379/15"
+from dotenv import load_dotenv
+load_dotenv()
 
 import pytest
 import asyncio
-import time
-from aioresponses import aioresponses, CallbackResult
-from fakeredis import aioredis as fake_aioredis
-from app.modules import execution_engine, redis_manager
+from unittest.mock import patch, MagicMock
 
-@pytest.fixture(autouse=True)
-async def setup_env(monkeypatch):
-    """Setup fakeredis and clean state"""
-    fake_client = fake_aioredis.FakeRedis(decode_responses=True)
-    monkeypatch.setattr(redis_manager, "redis_client", fake_client)
-    redis_manager._fallback_scores.clear()
-    redis_manager._fallback_quarantine.clear()
-    redis_manager._redis_available = True
-    yield fake_client
-    await fake_client.flushdb()
+from app.modules.execution_engine import (
+    execute_search,
+    execute_all,
+    SearchSnippet
+)
+
+def get_provider():
+    return os.environ.get("SEARCH_PROVIDER", "jina").lower()
 
 @pytest.mark.asyncio
-async def test_parallel_execution(setup_env):
+async def test_live_search_provider():
     """
-    Тест 1: Параллельность
-    Дано: 3 мок-ноды, каждая отвечает за 1.5 секунды
-    Действие: запустить execute_all(["q1", "q2", "q3"])
+    Тест реального поиска через выбранного по умолчанию провайдера.
     """
-    nodes = ["http://node1.com", "http://node2.com", "http://node3.com"]
-    for node in nodes:
-        await redis_manager.add_score(node, 0.0)
-    
-    async def delayed_callback(url, **kwargs):
-        await asyncio.sleep(1.5)
-        return CallbackResult(status=200, payload={"results": [{"url": f"{url}/res", "title": "res"}]})
+    provider = get_provider()
+    if provider in ("searxng", "tavily"):
+        pytest.skip(f"Provider {provider} live test not implemented yet.")
         
-    with aioresponses() as m:
-        for node in nodes:
-            # Need to match exact query or use regex. Pattern matching with regex is safer for query param.
-            import re
-            m.get(re.compile(fr"^{node}/\?format=json&q=q[123]$"), callback=delayed_callback)
+    query = "Тестовый запрос AI"
+    results = await execute_search(query)
+    
+    assert isinstance(results, list), "Should return a list"
+    assert len(results) > 0, f"Provider {provider} returned empty list for '{query}'"
+    
+    for snippet in results:
+        assert isinstance(snippet, SearchSnippet), "Items must be SearchSnippet objects"
+        assert snippet.title, "Title must not be empty"
+        assert snippet.url, "URL must not be empty"
+        assert snippet.snippet is not None, "Snippet must not be None"
+        
+@pytest.mark.asyncio
+async def test_execute_all_deduplication():
+    """
+    Тест оркестратора на дедупликацию и склейку.
+    """
+    # Имитируем ответы от провайдера для предсказуемости
+    async def mock_execute(query: str):
+        if query == "query1":
+            return [
+                SearchSnippet(title="Doc 1", url="https://example.com/1", snippet="text 1"),
+                SearchSnippet(title="Doc 2", url="https://example.com/2", snippet="text 2")
+            ]
+        elif query == "query2":
+            return [
+                SearchSnippet(title="Doc 2 Duplicate", url="https://example.com/2 ", snippet="text 2 duplicated"), # Пробел в URL
+                SearchSnippet(title="Doc 3", url="https://example.com/3", snippet="text 3")
+            ]
+        return []
+
+    with patch("app.modules.execution_engine.execute_search", side_effect=mock_execute):
+        results = await execute_all(["query1", "query2"])
+        
+        urls = set(s.url.strip().lower() for s in results)
+        assert len(results) == 3, "Should have exactly 3 unique results"
+        assert "https://example.com/1" in urls
+        assert "https://example.com/2" in urls
+        assert "https://example.com/3" in urls
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    get_provider() != "searxng",
+    reason="Legacy Redis logic only tested when SEARCH_PROVIDER == 'searxng'"
+)
+async def test_searxng_redis_logic():
+    """
+    Условный тест Redis. Выполняется только для searxng.
+    Проверяет, что движок обращается к Redis за нодой.
+    """
+    # Этот тест проверяет логику легаси-провайдера SearXNG, которая пока не реализована в новом роутере.
+    # Ожидается, что при вызове _search_searxng будет использован get_top_nodes.
+    
+    with patch("app.modules.redis_manager.get_top_nodes", new_callable=pytest.AsyncMock) as mock_get_nodes:
+        mock_get_nodes.return_value = ["http://mock-node1.com"]
+        
+        # Мокаем aiohttp сессию, чтобы не ходить в сеть
+        with patch("aiohttp.ClientSession.get") as mock_get:
+            mock_response = MagicMock()
+            mock_response.status = 200
+            # Mocking async context manager for response
+            mock_response.__aenter__.return_value = mock_response
+            mock_response.json = pytest.AsyncMock(return_value={"results": []})
+            mock_response.text = pytest.AsyncMock(return_value="")
+            mock_get.return_value = mock_response
             
-        start_time = time.time()
-        results = await execution_engine.execute_all(["q1", "q2", "q3"])
-        elapsed = time.time() - start_time
-        
-        assert 1.4 <= elapsed < 2.5
-        assert len(results) == 3
-
-@pytest.mark.asyncio
-async def test_fallback_mechanics(setup_env):
-    """
-    Тест 2: Fallback-механика
-    Дано: нода A = 502, нода B = 200 OK.
-    """
-    node_a = "http://node-a.com"
-    node_b = "http://node-b.com"
-    
-    await redis_manager.add_score(node_a, 50.0) # -> 150
-    await redis_manager.add_score(node_b, 0.0)  # -> 100
-    
-    with aioresponses() as m:
-        m.get(f"{node_a}/?format=json&q=test", status=502)
-        m.get(f"{node_b}/?format=json&q=test", status=200, payload={
-            "results": [{"url": "http://ok", "title": "ok"}]
-        })
-        
-        results = await execution_engine.execute_all(["test"])
-        
-        assert await redis_manager.is_quarantined(node_a) is True
-        assert len(results) == 1
-        assert results[0].source_node == node_b
-
-@pytest.mark.asyncio
-async def test_deduplication(setup_env):
-    """
-    Тест 3: Дедупликация
-    Два ответа от разных нод с одинаковым URL.
-    """
-    node1 = "http://node1.com"
-    node2 = "http://node2.com"
-    
-    await redis_manager.add_score(node1, 0.0)
-    await redis_manager.add_score(node2, 0.0)
-    
-    with aioresponses() as m:
-        import re
-        m.get(re.compile(fr"^{node1}/\?format=json&q=query1$"), status=200, payload={
-            "results": [{"url": "https://en.wikipedia.org/wiki/Test", "title": "Test1"}]
-        })
-        m.get(re.compile(fr"^{node2}/\?format=json&q=query2$"), status=200, payload={
-            "results": [{"url": "https://en.wikipedia.org/wiki/Test", "title": "Test2"}]
-        })
-        
-        results = await execution_engine.execute_all(["query1", "query2"])
-        
-        assert len(results) == 1
-        assert results[0].url == "https://en.wikipedia.org/wiki/Test"
+            await execute_search("Test SearXNG query")
+            
+            # Проверки: что мы брали ноды из Redis
+            mock_get_nodes.assert_called_once()

@@ -18,6 +18,18 @@ from app.modules.snippet_evaluator import evaluate_snippets
 from app.modules.jina_reader import fetch_all
 from app.modules.ai_judge import judge, JudgeInput
 
+# Настройка глобального логирования для отображения подробной "кухни" сервиса и записи в файл
+os.makedirs("logs", exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("logs/server.log", encoding="utf-8")
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Config
@@ -38,23 +50,18 @@ class ResearchResponse(BaseModel):
 # Ensure the harvester fills up the node pool before serving traffic
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Pre-warm Redis
-    logger.info("Starting Harvester pre-warm sequence...")
-    # Wrap in try-except so an API failure on startup doesn't kill the app unconditionally
-    try:
-        await run_harvest_cycle()
-    except Exception as e:
-        logger.warning(f"Failed to pre-warm harvester: {e}")
-    
     # Launch background loop
+    logger.info("Starting Harvester background loop...")
     harvester_task = asyncio.create_task(harvester_loop())
     
     yield
     
     # Shutdown
+    logger.info("Shutting down Harvester...")
     harvester_task.cancel()
 
 app = FastAPI(title="Smart AI Search API", lifespan=lifespan)
+
 
 async def run_research_pipeline(query: str, goal: str) -> dict:
     """Core RAG loop executing the sub-agents."""
@@ -73,11 +80,13 @@ async def run_research_pipeline(query: str, goal: str) -> dict:
             
         # 2. Execute parallel search
         snippets = await execute_all(current_queries)
+        logger.info(f"Iteration {iteration}: Execution engine returned {len(snippets)} raw snippets.")
         if not snippets:
             logger.warning(f"Execution engine returned no snippets on iteration {iteration}.")
             
         # 3. Snippet Triage 
         selected_urls = await evaluate_snippets(goal, snippets)
+        logger.info(f"Iteration {iteration}: Snippet Evaluator selected {len(selected_urls)} URLs: {selected_urls}")
         if not selected_urls:
             logger.warning(f"Iteration {iteration}: Snippet Evaluator selected 0 URLs.")
         
