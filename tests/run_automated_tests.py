@@ -45,9 +45,8 @@ async def send_research_request(session: aiohttp.ClientSession, endpoint: str, t
     
     start_time = time.monotonic()
     try:
-        # Уставляем таймаут для клиента чуть больше, чем GLOBAL_TIMEOUT_SEC на сервере (например 60 сек)
-        # На сервере по умолчанию 45.0
-        async with session.post(endpoint, json=payload, timeout=60.0) as response:
+        # Уставляем таймаут для клиента чуть больше, чем GLOBAL_TIMEOUT_SEC на сервере (200.0)
+        async with session.post(endpoint, json=payload, timeout=210.0) as response:
             if response.status != 200:
                 text = await response.text()
                 logger.error(f"Server returned non-200 status: {response.status}. Body: {text}")
