@@ -10,7 +10,8 @@ def base_input():
         goal="Узнать точную дату релиза",
         context={"http://python.org": "Python 3.12 был выпущен 2 октября 2023 года."},
         current_iteration=1,
-        max_iterations=3
+        max_iterations=3,
+        executed_queries=[]
     )
 
 @pytest.mark.asyncio
@@ -18,7 +19,7 @@ async def test_scenario_success(base_input):
     """Test standard Complete scenario."""
     mock_json = json.dumps({
         "status": "complete",
-        "final_answer": "Python 3.12 вышел 2 октября 2023 года.",
+        "useful_urls": ["http://python.org"],
         "missing_info": None,
         "new_queries": []
     })
@@ -29,7 +30,7 @@ async def test_scenario_success(base_input):
         result = await ai_judge.judge(base_input)
         
         assert result.status == "complete"
-        assert "2 октября 2023" in result.final_answer
+        assert "http://python.org" in result.useful_urls
         assert result.new_queries == []
         mock_llm.assert_called_once()
 
@@ -41,12 +42,13 @@ async def test_scenario_incomplete():
         goal="Понять последние изменения",
         context={"http://science.com": "Теория струн интересна, но новых данных нет."},
         current_iteration=1,
-        max_iterations=3
+        max_iterations=3,
+        executed_queries=[]
     )
     
     mock_json = json.dumps({
         "status": "incomplete",
-        "final_answer": None,
+        "useful_urls": [],
         "missing_info": "Не хватает информации о последних изменениях",
         "new_queries": ["новые открытия в теории струн 2023"]
     })
@@ -57,7 +59,7 @@ async def test_scenario_incomplete():
         result = await ai_judge.judge(inp)
         
         assert result.status == "incomplete"
-        assert result.final_answer is None
+        assert result.useful_urls == []
         assert "изменениях" in result.missing_info
         assert len(result.new_queries) == 1
 
@@ -69,13 +71,14 @@ async def test_scenario_last_chance_override():
         goal="Найти документы Альфа Центавра",
         context={"http://news.com": "Тут пусто."},
         current_iteration=3, # Max iterations!
-        max_iterations=3
+        max_iterations=3,
+        executed_queries=[]
     )
     
     # LLM stubbornly returns incomplete
     mock_json = json.dumps({
         "status": "incomplete",
-        "final_answer": None,
+        "useful_urls": [],
         "missing_info": "Вообще ничего нет",
         "new_queries": ["снова ищем"]
     })
@@ -87,14 +90,13 @@ async def test_scenario_last_chance_override():
         
         # Guard logic should have overridden this to complete
         assert result.status == "complete"
-        # Since LLM returned None for final_answer, the safeguard should inject a fallback string
-        assert result.final_answer is not None
-        assert "Вообще ничего нет" in result.final_answer  # missing info is often appended
+        # Since LLM returned incomplete, the safeguard should just set status to complete 
+        assert result.useful_urls == []
 
 @pytest.mark.asyncio
 async def test_invalid_json_fallback(base_input):
     """Test regex fallback extraction for judge JSON parsing."""
-    messy = "Here is the response:\n{\"status\": \"complete\", \"final_answer\": \"Answer!\"}\nHope this is good."
+    messy = "Here is the response:\n{\"status\": \"complete\", \"useful_urls\": [\"http://python.org\"]}\nHope this is good."
     
     with patch("app.core.llm.generate_json", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = messy
@@ -102,4 +104,4 @@ async def test_invalid_json_fallback(base_input):
         result = await ai_judge.judge(base_input)
         
         assert result.status == "complete"
-        assert result.final_answer == "Answer!"
+        assert "http://python.org" in result.useful_urls

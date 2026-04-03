@@ -15,7 +15,7 @@ class SearchSnippet:
     url: str
     snippet: str
 
-async def _search_jina(query: str) -> List[SearchSnippet]:
+async def _search_jina(query: str, session: aiohttp.ClientSession) -> List[SearchSnippet]:
     """Search using Jina AI provider."""
     start_time = time.monotonic()
     
@@ -37,7 +37,7 @@ async def _search_jina(query: str) -> List[SearchSnippet]:
         headers["Authorization"] = f"Bearer {jina_api_key}"
         
     params = {}
-    params["num"] = int(os.environ.get("JINA_SEARCH_NUM_RESULTS", "5"))
+    params["num"] = int(os.environ.get("SEARCH_NUM_RESULTS", "5"))
     
     locale = os.environ.get("JINA_SEARCH_LOCALE", "")
     if locale:
@@ -53,26 +53,25 @@ async def _search_jina(query: str) -> List[SearchSnippet]:
         
     snippets = []
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status != 200:
-                    logger.warning(f"Jina API returned status {response.status} for query '{query}'")
-                    return snippets
-                    
-                data = await response.json()
-                items = data.get("data", [])
+        async with session.get(url, headers=headers, params=params) as response:
+            if response.status != 200:
+                logger.warning(f"Jina API returned status {response.status} for query '{query}'")
+                return snippets
                 
-                for item in items:
-                    title = item.get("title", "")
-                    item_url = item.get("url", "")
-                    description = item.get("description", "")
-                    
-                    if item_url and title:
-                        snippets.append(SearchSnippet(
-                            title=title,
-                            url=item_url,
-                            snippet=description
-                        ))
+            data = await response.json()
+            items = data.get("data", [])
+            
+            for item in items:
+                title = item.get("title", "")
+                item_url = item.get("url", "")
+                description = item.get("description", "")
+                
+                if item_url and title:
+                    snippets.append(SearchSnippet(
+                        title=title,
+                        url=item_url,
+                        snippet=description
+                    ))
     except Exception as e:
         logger.error(f"Error calling Jina API for query '{query}': {e}", exc_info=True)
         
@@ -80,26 +79,67 @@ async def _search_jina(query: str) -> List[SearchSnippet]:
     logger.info(f"Jina search for '{query}' took {duration:.2f}s")
     return snippets
 
-async def _search_tavily(query: str) -> List[SearchSnippet]:
-    """Stub for Tavily provider."""
-    return []
+async def _search_tavily(query: str, session: aiohttp.ClientSession) -> List[SearchSnippet]:
+    """Search using Tavily AI provider."""
+    start_time = time.monotonic()
+    tavily_api_key = os.environ.get("TAVILY_API_KEY")
+    num_results = int(os.environ.get("SEARCH_NUM_RESULTS", "5"))
+    
+    if not tavily_api_key:
+        logger.error("TAVILY_API_KEY not found in environment.")
+        return []
+        
+    snippets = []
+    try:
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": tavily_api_key,
+            "query": query,
+            "max_results": num_results,
+            "search_depth": "basic",
+            "include_answer": False,
+            "include_images": False,
+            "include_raw_content": False
+        }
+        
+        async with session.post(url, json=payload) as response:
+            if response.status != 200:
+                text = await response.text()
+                logger.warning(f"Tavily API returned status {response.status} for query '{query}': {text}")
+                return snippets
+                
+            data = await response.json()
+            results = data.get("results", [])
+            
+            for res in results:
+                snippets.append(SearchSnippet(
+                    title=res.get("title", ""),
+                    url=res.get("url", ""),
+                    snippet=res.get("content", "")
+                ))
+    except Exception as e:
+        logger.error(f"Error calling Tavily API for query '{query}': {e}", exc_info=True)
+        
+    duration = time.monotonic() - start_time
+    logger.info(f"Tavily search for '{query}' took {duration:.2f}s")
+    return snippets
 
-async def _search_searxng(query: str) -> List[SearchSnippet]:
+async def _search_searxng(query: str, session: aiohttp.ClientSession) -> List[SearchSnippet]:
     """Stub for SearXNG provider."""
     return []
 
-async def execute_search(query: str) -> List[SearchSnippet]:
-    """Route search to the selected provider. Defalut is Jina."""
-    provider = os.environ.get("SEARCH_PROVIDER", "jina").lower()
+async def execute_search(query: str, session: aiohttp.ClientSession) -> List[SearchSnippet]:
+    """Route search to the selected provider. Defalut is Tavily."""
+    provider = os.environ.get("SEARCH_PROVIDER", "tavily").lower()
     logger.info(f"Routing query '{query}' to provider: {provider}")
     
     if provider == "tavily":
-        return await _search_tavily(query)
+        return await _search_tavily(query, session)
     elif provider == "searxng":
-        return await _search_searxng(query)
+        return await _search_searxng(query, session)
     else:
         # Default or unknown provider falls back to jina
-        return await _search_jina(query)
+        return await _search_jina(query, session)
 
 async def execute_all(queries: List[str]) -> List[SearchSnippet]:
     """Execute search for multiple queries concurrently, flatten and deduplicate."""
@@ -107,8 +147,9 @@ async def execute_all(queries: List[str]) -> List[SearchSnippet]:
         return []
     
     logger.info(f"Executing parallel search for {len(queries)} queries...")
-    tasks = [execute_search(query) for query in queries]
-    results_list = await asyncio.gather(*tasks, return_exceptions=True)
+    async with aiohttp.ClientSession() as session:
+        tasks = [execute_search(query, session) for query in queries]
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
     
     flat_results = []
     for res in results_list:
@@ -121,7 +162,7 @@ async def execute_all(queries: List[str]) -> List[SearchSnippet]:
     unique_snippets = []
     seen_urls = set()
     
-    exclude_domains_str = os.environ.get("JINA_SEARCH_EXCLUDE_DOMAINS", "twitter.com,x.com,facebook.com,instagram.com,t.me,vk.com")
+    exclude_domains_str = os.environ.get("SEARCH_EXCLUDE_DOMAINS", "twitter.com,x.com,facebook.com,instagram.com,t.me,vk.com")
     exclude_domains = [d.strip().lower() for d in exclude_domains_str.split(",") if d.strip()]
     exclude_exts = [".pdf", ".doc", ".docx", ".xls", ".ppt"]
     
@@ -130,12 +171,12 @@ async def execute_all(queries: List[str]) -> List[SearchSnippet]:
         
         # Check extensions
         if any(url_norm.endswith(ext) for ext in exclude_exts):
-            logger.debug(f"Jina Search: excluded {snippet.url} (document extension)")
+            logger.debug(f"Search Engine: excluded {snippet.url} (document extension)")
             continue
             
         # Check domains
         if any(domain in url_norm for domain in exclude_domains):
-            logger.debug(f"Jina Search: excluded {snippet.url} (domain filter)")
+            logger.debug(f"Search Engine: excluded {snippet.url} (domain filter)")
             continue
 
         if url_norm not in seen_urls:

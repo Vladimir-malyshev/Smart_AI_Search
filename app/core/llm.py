@@ -2,25 +2,31 @@ import os
 import re
 import time
 import asyncio
-import time
 import logging
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-# Default to gemini if not provided
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
+MODEL_CAPABILITIES = {
+    "gemma-4": {"native_json_schema": True, "native_tools": True},
+    "gemini-3.1-flash": {"native_json_schema": True, "native_tools": True},
+    "gemini-exp": {"native_json_schema": True, "native_tools": True},
+    "gemma-3": {"native_json_schema": False, "native_tools": False},
+}
 
 
 class LLMProvider:
     def __init__(self):
-        self.provider = LLM_PROVIDER
+        # Читаем провайдера в момент создания, а не на уровне модуля
+        self.provider = os.environ.get("LLM_PROVIDER", "gemini").lower()
 
         if self.provider == "gemini":
             try:
                 from google import genai
                 # Поддерживаем GEMINI_API_KEY и GOOGLE_API_KEY
                 api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                if not api_key:
+                    raise ValueError("API key for Gemini is missing! Please set GEMINI_API_KEY or GOOGLE_API_KEY in the environment.")
                 self.gemini_client = genai.Client(api_key=api_key)
             except ImportError:
                 raise ImportError("Please install google-genai package for Gemini provider")
@@ -29,6 +35,8 @@ class LLMProvider:
             try:
                 from openai import AsyncOpenAI
                 api_key = os.environ.get("OPENAI_API_KEY")
+                if not api_key:
+                    raise ValueError("API key for OpenAI is missing! Please set OPENAI_API_KEY in the environment.")
                 base_url = os.environ.get("OPENAI_BASE_URL")
                 self.openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
             except ImportError:
@@ -44,7 +52,7 @@ class LLMProvider:
             return match.group(1).strip()
         return raw.strip()
 
-    async def generate_json(self, prompt: str, system_prompt: str, model_name: str) -> str:
+    async def generate_json(self, prompt: str, system_prompt: str, model_name: str, response_schema: Optional[Any] = None) -> str:
         """
         Генерирует JSON-ответ через выбранного провайдера.
         Включает автоматический retry с экспоненциальным backoff при 429.
@@ -54,14 +62,24 @@ class LLMProvider:
         if self.provider == "gemini":
             from google.genai import types
 
-            combined_prompt = (
-                f"System Instruction:\n{system_prompt}\n\n"
-                f"User Question:\n{prompt}\n\n"
-                "IMPORTANT: Your response MUST be valid JSON only. "
-                "Do not include any explanation, markdown, or code fences. "
-                "Output raw JSON and nothing else."
-            )
-            config = types.GenerateContentConfig(temperature=0.3)
+            caps = next((caps for prefix, caps in MODEL_CAPABILITIES.items() if model_name.startswith(prefix)), {"native_json_schema": False, "native_tools": False})
+            native_json = caps.get("native_json_schema", False)
+
+            if native_json:
+                combined_prompt = f"System Instruction:\n{system_prompt}\n\nUser Question:\n{prompt}"
+                config_kwargs = {"temperature": 0.3, "response_mime_type": "application/json"}
+                if response_schema is not None:
+                    config_kwargs["response_schema"] = response_schema
+                config = types.GenerateContentConfig(**config_kwargs)
+            else:
+                combined_prompt = (
+                    f"System Instruction:\n{system_prompt}\n\n"
+                    f"User Question:\n{prompt}\n\n"
+                    "IMPORTANT: Your response MUST be valid JSON only. "
+                    "Do not include any explanation, markdown, or code fences. "
+                    "Output raw JSON and nothing else."
+                )
+                config = types.GenerateContentConfig(temperature=0.3)
 
             last_exc = None
             for attempt in range(1, max_retries + 1):
@@ -73,7 +91,8 @@ class LLMProvider:
                         config=config,
                     )
                     duration = time.monotonic() - start_time
-                    result = self._extract_json(response.text or "")
+                    raw_text = response.text or ""
+                    result = raw_text if native_json else self._extract_json(raw_text)
                     logger.info(f"[llm] Gemini {model_name} responded in {duration:.2f}s. Response: {result[:200]}...")
                     return result
                 except Exception as e:
@@ -124,7 +143,7 @@ def get_llm_provider() -> LLMProvider:
     return get_llm_provider._instance
 
 
-async def generate_json(prompt: str, system_prompt: str, model_name: str) -> str:
+async def generate_json(prompt: str, system_prompt: str, model_name: str, response_schema: Optional[Any] = None) -> str:
     """Convenience wrapper для генерации JSON."""
     provider = get_llm_provider()
-    return await provider.generate_json(prompt, system_prompt, model_name)
+    return await provider.generate_json(prompt, system_prompt, model_name, response_schema=response_schema)

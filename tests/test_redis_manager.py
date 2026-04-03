@@ -13,7 +13,7 @@ import pytest_asyncio
 async def mock_redis(monkeypatch):
     """Replace real redis client with fakeredis one."""
     fake_client = fake_aioredis.FakeRedis(decode_responses=True)
-    monkeypatch.setattr(redis_manager, "redis_client", fake_client)
+    monkeypatch.setattr(redis_manager, "_redis_client", fake_client)
     
     # Reset in-memory state
     redis_manager._fallback_scores.clear()
@@ -122,7 +122,7 @@ async def test_fallback_mechanism(monkeypatch):
     async def failing_zincrby(*args, **kwargs):
         raise ConnectionError("Mock connection error")
         
-    monkeypatch.setattr(redis_manager.redis_client, "zincrby", failing_zincrby)
+    monkeypatch.setattr(fake_aioredis.FakeRedis, "zincrby", failing_zincrby)
     # При вызове pipeline оно тоже может упасть, замокаем execute
     async def failing_execute(*args, **kwargs):
         raise ConnectionError("Mock connection error")
@@ -137,8 +137,11 @@ async def test_fallback_mechanism(monkeypatch):
         def zincrby(self, *args, **kwargs): pass
         async def execute(self): raise ConnectionError("mock error")
 
-    monkeypatch.setattr(redis_manager.redis_client, "pipeline", FailingPipeline)
-    monkeypatch.setattr(redis_manager.redis_client, "ping", failing_execute)
+    monkeypatch.setattr(fake_aioredis.FakeRedis, "pipeline", FailingPipeline)
+    monkeypatch.setattr(fake_aioredis.FakeRedis, "ping", failing_execute)
+    
+    # Pre-inject fake client
+    redis_manager._redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     
     score = await redis_manager.add_score(url, 15)
     

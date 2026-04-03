@@ -10,7 +10,7 @@ from app.modules.execution_engine import SearchSnippet
 @pytest.fixture
 def mock_snippets():
     return [
-        SearchSnippet(url=f"https://source{i}.com", title=f"Title {i}", snippet=f"Snippet {i}", source_node="node")
+        SearchSnippet(url=f"https://source{i}.com", title=f"Title {i}", snippet=f"Snippet {i}")
         for i in range(5)
     ]
 

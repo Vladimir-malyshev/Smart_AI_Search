@@ -6,16 +6,8 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Configuration
-JINA_API_KEY = os.environ.get("JINA_API_KEY")
+# Дефолтное значение для ссылки в тестах — реальное значение берётся из env при каждом вызове
 JINA_MAX_CHARS = int(os.environ.get("JINA_MAX_CHARS", 20000))
-JINA_TIMEOUT_SEC = float(os.environ.get("JINA_TIMEOUT_SEC", 15.0))
-JINA_CONCURRENCY = int(os.environ.get("JINA_CONCURRENCY", 4))
-JINA_REMOVE_OVERLAY = os.environ.get("JINA_REMOVE_OVERLAY", "true").lower() == "true"
-JINA_TOKEN_BUDGET = os.environ.get("JINA_TOKEN_BUDGET", "")
-JINA_LOCALE = os.environ.get("JINA_LOCALE", "")
-JINA_RESPOND_TIMING = os.environ.get("JINA_RESPOND_TIMING", "network-idle")
-JINA_REMOVE_SELECTOR = os.environ.get("JINA_REMOVE_SELECTOR", "header, footer, nav, aside, .sidebar, .comments, #comments, .advertisement, .nav, .menu")
 
 TRUNCATION_MARKER = "\n\n[...ТЕКСТ ОБРЕЗАН — достигнут лимит контекста...]"
 
@@ -64,23 +56,32 @@ async def fetch_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:
         "X-Md-Link-Style": "discarded"
     }
     
-    if JINA_REMOVE_OVERLAY:
+    jina_remove_overlay = os.environ.get("JINA_REMOVE_OVERLAY", "true").lower() == "true"
+    jina_remove_selector = os.environ.get("JINA_REMOVE_SELECTOR", "header, footer, nav, aside, .sidebar, .comments, #comments, .advertisement, .nav, .menu")
+    jina_token_budget = os.environ.get("JINA_TOKEN_BUDGET", "")
+    jina_locale = os.environ.get("JINA_LOCALE", "")
+    jina_respond_timing = os.environ.get("JINA_RESPOND_TIMING", "network-idle")
+    jina_api_key = os.environ.get("JINA_API_KEY")
+    jina_max_chars = int(os.environ.get("JINA_MAX_CHARS", 20000))
+    jina_timeout_sec = float(os.environ.get("JINA_TIMEOUT_SEC", 15.0))
+    
+    if jina_remove_overlay:
         headers["X-Remove-Overlay"] = "true"
-    if JINA_REMOVE_SELECTOR:
-        headers["X-Remove-Selector"] = JINA_REMOVE_SELECTOR
-    if JINA_TOKEN_BUDGET:
-        headers["X-Token-Budget"] = JINA_TOKEN_BUDGET
-    if JINA_LOCALE:
-        headers["X-Locale"] = JINA_LOCALE
-    if JINA_RESPOND_TIMING:
-        headers["X-Respond-Timing"] = JINA_RESPOND_TIMING
-    if JINA_API_KEY:
-        headers["Authorization"] = f"Bearer {JINA_API_KEY}"
+    if jina_remove_selector:
+        headers["X-Remove-Selector"] = jina_remove_selector
+    if jina_token_budget:
+        headers["X-Token-Budget"] = jina_token_budget
+    if jina_locale:
+        headers["X-Locale"] = jina_locale
+    if jina_respond_timing:
+        headers["X-Respond-Timing"] = jina_respond_timing
+    if jina_api_key:
+        headers["Authorization"] = f"Bearer {jina_api_key}"
         
     jina_url = f"https://r.jina.ai/{url}"
     
     try:
-        timeout = aiohttp.ClientTimeout(total=JINA_TIMEOUT_SEC)
+        timeout = aiohttp.ClientTimeout(total=jina_timeout_sec)
         async with session.get(jina_url, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 logger.warning(f"Jina error: {url} returned HTTP {resp.status}")
@@ -92,12 +93,12 @@ async def fetch_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:
                 logger.warning(f"Jina: Content blocked or low quality for {url}")
                 return None
             
-            final_content = truncate_content(content, JINA_MAX_CHARS)
+            final_content = truncate_content(content, jina_max_chars)
             logger.info(f"Jina Reader: {url} → {len(final_content)} chars extracted (raw: {len(content)})")
             return final_content
             
     except asyncio.TimeoutError:
-        logger.warning(f"Jina: Timeout for {url} after {JINA_TIMEOUT_SEC}s")
+        logger.warning(f"Jina: Timeout for {url} after {jina_timeout_sec}s")
         return None
     except aiohttp.ClientError as e:
         logger.warning(f"Jina: Network error for {url}: {e}")
@@ -111,8 +112,9 @@ async def fetch_all(urls: List[str]) -> Dict[str, Optional[str]]:
     if not urls:
         return {}
     
+    jina_concurrency = int(os.environ.get("JINA_CONCURRENCY", 4))
     logger.info(f"Jina: Fetching {len(urls)} URLs in parallel...")
-    sem = asyncio.Semaphore(JINA_CONCURRENCY)
+    sem = asyncio.Semaphore(jina_concurrency)
     
     # Keep session for all requests
     async with aiohttp.ClientSession() as session:

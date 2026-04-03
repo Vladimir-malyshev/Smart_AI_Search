@@ -8,7 +8,6 @@ from app.modules import redis_manager
 logger = logging.getLogger(__name__)
 
 # Configuration
-INSTANCES_JSON_URL = "https://searx.space/data/instances.json"
 HARVESTER_INTERVAL_SEC = int(os.environ.get("HARVESTER_INTERVAL_SEC", 3600))
 HEALTH_CHECK_TIMEOUT_SEC = float(os.environ.get("HEALTH_CHECK_TIMEOUT_SEC", 2.0))
 HEALTH_CHECK_CONCURRENCY = int(os.environ.get("HEALTH_CHECK_CONCURRENCY", 20))
@@ -19,18 +18,23 @@ DEFAULT_HEADERS = {
     "Accept": "application/json"
 }
 
+# Публичная константа для использования в тестах и для ссылки внутри модуля
+INSTANCES_JSON_URL = os.environ.get("SEARXNG_INSTANCES_URL", "https://searx.space/data/instances.json")
+
 async def fetch_instances() -> Optional[Dict[str, Any]]:
     """Fetch instances list from searx.space."""
+    # Константа для тестов (также читается напрямую)
+    url = INSTANCES_JSON_URL
     try:
         async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
-            async with session.get(INSTANCES_JSON_URL, timeout=10) as response:
+            async with session.get(url, timeout=10) as response:
                 if response.status == 200:
                     return await response.json()
                 else:
-                    logger.error(f"Failed to fetch instances from {INSTANCES_JSON_URL}: {response.status}")
+                    logger.error(f"Failed to fetch instances from {url}: {response.status}")
                     return None
     except Exception as e:
-        logger.error(f"Error fetching instances from {INSTANCES_JSON_URL}: {e}")
+        logger.error(f"Error fetching instances from {url}: {e}")
         return None
 
 def apply_primary_filter(data: Dict[str, Any]) -> List[str]:
@@ -72,7 +76,9 @@ async def health_check_node(session: aiohttp.ClientSession, url: str, semaphore:
     """Test a single node for availability and valid JSON response."""
     async with semaphore:
         # Небольшая пауза перед запросом, чтобы не выглядеть как DDoS
-        await asyncio.sleep(0.5)
+        delay = float(os.environ.get("HEALTH_CHECK_PING_DELAY_SEC", "0.5"))
+        if delay > 0:
+            await asyncio.sleep(delay)
         
         # Меняем 'test' на 'weather' — так запрос выглядит как от реального человека
         test_url = f"{url.rstrip('/')}/?q=weather&format=json"

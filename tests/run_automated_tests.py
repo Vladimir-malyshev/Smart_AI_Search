@@ -7,6 +7,15 @@ import logging
 from pathlib import Path
 import time
 from typing import TypedDict, List, Dict, Any
+from dotenv import load_dotenv
+import sys
+
+# Добавляем корень проекта в sys.path, чтобы можно было запускать файл напрямую из IDE
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.core import llm
+
+# Load environment variables
+load_dotenv()
 
 # Настроим детальное логирование самого тест-раннера
 os.makedirs("logs", exist_ok=True)
@@ -37,6 +46,40 @@ def load_test_cases(file_path: Path) -> List[TestCase]:
             logger.error(f"Failed to parse test cases JSON: {e}")
             return []
 
+async def synthesize_final_answer(user_query: str, user_goal: str, scraped_markdown: str) -> str:
+    try:
+        system_prompt = """Ты — строгий QA-ассистент. Твоя единственная база знаний — это текст, предоставленный ниже в блоке [МАТЕРИАЛЫ]. Ты не знаешь ничего о реальном мире.
+Твоя задача — дать подробный и развернутый ответ на вопрос пользователя, чтобы достичь его цели.
+
+ПРАВИЛА:
+
+    Используй ТОЛЬКО факты из предоставленного текста.
+
+    Если в тексте есть ответ — напиши понятный, развернутый ответ.
+
+    Если в тексте НЕТ нужной информации для ответа, ты ОБЯЗАН ответить: "ОТКАЗ: В собранных материалах нет ответа на запрос".
+
+    ЗАПРЕЩЕНО додумывать, использовать внутреннюю память или писать "в тексте нет, но на самом деле...".
+
+ОБЯЗАТЕЛЬНО возвращай ответ в формате JSON:
+{
+    "answer": "твой ответ здесь"
+}"""
+
+        user_prompt = f"Запрос: {user_query}\nЦель: {user_goal}\n\n[МАТЕРИАЛЫ]:\n{scraped_markdown}"
+        model_name = os.environ.get("SYNTHESIZER_LLM_MODEL", "gemini-3.1-flash-lite-preview")
+        
+        resp_json = await llm.generate_json(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            model_name=model_name
+        )
+        data = json.loads(resp_json)
+        return data.get("answer", "")
+    except Exception as e:
+        logger.error(f"Error during synthesis: {e}")
+        return f"ERROR during synthesis: {e}"
+
 async def send_research_request(session: aiohttp.ClientSession, endpoint: str, test_case: TestCase) -> Dict[str, Any]:
     payload = {
         "query": test_case["query"],
@@ -45,8 +88,8 @@ async def send_research_request(session: aiohttp.ClientSession, endpoint: str, t
     
     start_time = time.monotonic()
     try:
-        # Уставляем таймаут для клиента чуть больше, чем GLOBAL_TIMEOUT_SEC на сервере (200.0)
-        async with session.post(endpoint, json=payload, timeout=210.0) as response:
+        # Уставляем таймаут для клиента чуть больше, чем GLOBAL_TIMEOUT_SEC на сервере (600.0)
+        async with session.post(endpoint, json=payload, timeout=650.0) as response:
             if response.status != 200:
                 text = await response.text()
                 logger.error(f"Server returned non-200 status: {response.status}. Body: {text}")
@@ -132,12 +175,25 @@ async def run_all_tests(endpoint: str, cases: List[TestCase], pause_sec: int = 2
                     os.makedirs("logs/results", exist_ok=True)
                     slug = "".join(c if c.isalnum() else "_" for c in case['query'].lower())[:30]
                     filename = f"logs/results/test_{idx:02d}_{slug}.md"
+                    
+                    logger.info("Synthesizing final answer with LLM...")
+                    final_answer = await synthesize_final_answer(
+                        user_query=case['query'], 
+                        user_goal=case['goal'], 
+                        scraped_markdown=result["answer"]
+                    )
+                    logger.info(f"Synthesizer returned:\n{final_answer}")
+                    
                     try:
                         with open(filename, "w", encoding="utf-8") as f:
                             f.write(f"# Query: {case['query']}\n")
                             f.write(f"# Goal: {case['goal']}\n\n")
+                            f.write(f"# Финальный ответ LLM\n")
+                            f.write(f"{final_answer}\n\n")
+                            f.write(f"---\n\n")
+                            f.write(f"# Сырые извлеченные данные\n\n")
                             f.write(result["answer"])
-                        logger.info(f"Saved extracted result to {filename}")
+                        logger.info(f"Saved extracted result and synthesized answer to {filename}")
                     except Exception as e:
                         logger.error(f"Failed to save result to file: {e}")
             else:

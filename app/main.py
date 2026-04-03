@@ -49,8 +49,28 @@ class ResearchResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Harvester loop disabled as per task_011
+    # Harvester и Redis включаются только при явном указании USE_REDIS=true.
+    # В текущем режиме (Tavily + Jina Reader) Redis не используется в активном пайплайне.
+    use_redis = os.environ.get("USE_REDIS", "false").strip().lower() == "true"
+    harvester_task = None
+
+    if use_redis:
+        logger.info("USE_REDIS=true: запуск harvester loop и инициализация Redis-клиента.")
+        from app.modules import harvester, redis_manager
+        # Инициализируем клиент Redis при старте, чтобы поймать ошибку сразу
+        redis_manager.get_redis_client()
+        harvester_task = asyncio.create_task(harvester.harvester_loop())
+    else:
+        logger.info("USE_REDIS=false: Redis и harvester отключены. Используется in-memory fallback.")
+
     yield
+
+    if harvester_task:
+        harvester_task.cancel()
+        try:
+            await harvester_task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(title="Smart AI Search API", lifespan=lifespan)
 

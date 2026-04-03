@@ -4,6 +4,7 @@ load_dotenv()
 
 import pytest
 import asyncio
+import aiohttp
 from unittest.mock import patch, MagicMock
 
 from app.modules.execution_engine import (
@@ -25,7 +26,8 @@ async def test_live_search_provider():
         pytest.skip(f"Provider {provider} live test not implemented yet.")
         
     query = "Тестовый запрос AI"
-    results = await execute_search(query)
+    async with aiohttp.ClientSession() as session:
+        results = await execute_search(query, session)
     
     assert isinstance(results, list), "Should return a list"
     assert len(results) > 0, f"Provider {provider} returned empty list for '{query}'"
@@ -42,7 +44,7 @@ async def test_execute_all_deduplication():
     Тест оркестратора на дедупликацию и склейку.
     """
     # Имитируем ответы от провайдера для предсказуемости
-    async def mock_execute(query: str):
+    async def mock_execute(query: str, session: aiohttp.ClientSession):
         if query == "query1":
             return [
                 SearchSnippet(title="Doc 1", url="https://example.com/1", snippet="text 1"),
@@ -91,7 +93,8 @@ async def test_searxng_redis_logic():
             mock_response.text = pytest.AsyncMock(return_value="")
             mock_get.return_value = mock_response
             
-            await execute_search("Test SearXNG query")
+            async with aiohttp.ClientSession() as session:
+                await execute_search("Test SearXNG query", session)
             
             # Проверки: что мы брали ноды из Redis
             mock_get_nodes.assert_called_once()

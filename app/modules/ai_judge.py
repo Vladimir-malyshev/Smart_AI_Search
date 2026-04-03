@@ -46,11 +46,19 @@ def format_context(context: Dict[str, Optional[str]]) -> str:
             parts.append(f"=== Источник: {url} ===\n[Контент недоступен]\n")
     return "\n".join(parts)
 
+_prompts_config = None
+
+def get_prompts_config():
+    global _prompts_config
+    if _prompts_config is None:
+        config_path = Path(__file__).resolve().parent.parent / "config" / "prompts.yaml"
+        with open(config_path, "r", encoding="utf-8") as f:
+            _prompts_config = yaml.safe_load(f)
+    return _prompts_config
+
 def build_system_prompt(current_iteration: int, max_iterations: int, is_final: bool) -> str:
     """Builds the dynamic system prompt based on iteration context."""
-    config_path = Path(__file__).resolve().parent.parent / "config" / "prompts.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        prompts_config = yaml.safe_load(f)
+    prompts_config = get_prompts_config()
         
     base = prompts_config.get("ai_judge_system", "")
     

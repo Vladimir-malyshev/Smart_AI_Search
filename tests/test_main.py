@@ -1,5 +1,4 @@
 import os
-os.environ["REDIS_URL"] = "redis://localhost:6379"
 
 import pytest
 import asyncio
@@ -14,24 +13,18 @@ from app.modules.ai_judge import JudgeOutput
 @pytest.fixture
 def mock_pipeline_modules():
     """Mock all external module calls to isolate pipeline orchestration."""
-    with patch("app.main.expand_query", new_callable=AsyncMock) as mock_expand, \
-         patch("app.main.execute_all", new_callable=AsyncMock) as mock_execute, \
+    with patch("app.main.execute_all", new_callable=AsyncMock) as mock_execute, \
          patch("app.main.evaluate_snippets", new_callable=AsyncMock) as mock_eval, \
          patch("app.main.fetch_all", new_callable=AsyncMock) as mock_fetch, \
-         patch("app.main.judge", new_callable=AsyncMock) as mock_judge, \
-         patch("app.main.run_harvest_cycle", new_callable=AsyncMock) as mock_run_harvest_cycle, \
-         patch("app.modules.harvester.harvester_loop", new_callable=AsyncMock) as mock_harvester_loop:
+         patch("app.main.judge", new_callable=AsyncMock) as mock_judge:
 
         # Default fast behaviors
-        mock_run_harvest_cycle.return_value = None
-        mock_expand.return_value = ["q1"]
-        mock_execute.return_value = [SearchSnippet(url="http://mock.com", title="x", snippet="x", source_node="n")]
+        mock_execute.return_value = [SearchSnippet(url="http://mock.com", title="x", snippet="x")]
         mock_eval.return_value = ["http://mock.com"]
-        mock_fetch.return_value = {"http://mock.com": "content"}
-        mock_judge.return_value = JudgeOutput(status="complete", final_answer="Mocked Answer", missing_info=None)
+        mock_fetch.return_value = {"http://mock.com": "Mocked Content Body."}
+        mock_judge.return_value = JudgeOutput(status="complete", useful_urls=["http://mock.com"], missing_info=None)
         
         yield {
-            "expand": mock_expand,
             "execute": mock_execute,
             "eval": mock_eval,
             "fetch": mock_fetch,
@@ -48,18 +41,18 @@ def test_successful_end_to_end(mock_pipeline_modules):
         data = response.json()
         assert data["status"] == "complete"
         assert data["iterations_used"] == 1
-        assert data["answer"] == "Mocked Answer"
+        assert "Mocked Content Body" in data["answer"]
         assert "http://mock.com" in data["sources"]
         assert data["elapsed_sec"] >= 0.0
 
 @pytest.mark.asyncio
 async def test_global_timeout_graceful_return(mock_pipeline_modules):
     """Test that if the pipeline takes longer than GLOBAL_TIMEOUT_SEC, it returns 'timeout' gracefully."""
-    async def slow_expand(*args, **kwargs):
+    async def slow_execute(*args, **kwargs):
         await asyncio.sleep(2.0)
-        return ["q1"]
+        return []
         
-    mock_pipeline_modules["expand"].side_effect = slow_expand
+    mock_pipeline_modules["execute"].side_effect = slow_execute
     
     with patch("app.main.GLOBAL_TIMEOUT_SEC", 1.0):
         with TestClient(app) as test_client:
@@ -74,8 +67,8 @@ async def test_global_timeout_graceful_return(mock_pipeline_modules):
 def test_deep_research_iterations(mock_pipeline_modules):
     """Test that 'incomplete' status causes the loop to run again."""
     mock_pipeline_modules["judge"].side_effect = [
-        JudgeOutput(status="incomplete", final_answer=None, missing_info="more info", new_queries=["q2"]),
-        JudgeOutput(status="complete", final_answer="Deep Answer", missing_info=None, new_queries=[])
+        JudgeOutput(status="incomplete", useful_urls=[], missing_info="more info", new_queries=["q2"]),
+        JudgeOutput(status="complete", useful_urls=["http://mock.com"], missing_info=None, new_queries=[])
     ]
     
     with TestClient(app) as test_client:
@@ -85,15 +78,30 @@ def test_deep_research_iterations(mock_pipeline_modules):
         data = response.json()
         assert data["status"] == "complete"
         assert data["iterations_used"] == 2
-        assert data["answer"] == "Deep Answer"
+        assert "Mocked Content Body" in data["answer"]
 
 @pytest.mark.asyncio
 async def test_concurrent_isolation(mock_pipeline_modules):
     """Test that multiple requests don't leak context across each other."""
-    
+
+    async def mock_execute(queries, session=None):
+        # Возвращаем сниппет с URL специфичным для первого запроса
+        q = queries[0] if isinstance(queries, list) else queries
+        return [SearchSnippet(url=f"http://mock_{q}.com", title=q, snippet=q)]
+
+    async def mock_eval(goal, snippets):
+        return [s.url for s in snippets]
+
+    async def mock_fetch(urls):
+        return {url: f"Ans for {url}" for url in urls}
+
     async def mock_judge(inp):
-        return JudgeOutput(status="complete", final_answer=f"Ans for {inp.original_query}", missing_info=None)
-        
+        urls = list(inp.context.keys())
+        return JudgeOutput(status="complete", useful_urls=urls, missing_info=None)
+
+    mock_pipeline_modules["execute"].side_effect = mock_execute
+    mock_pipeline_modules["eval"].side_effect = mock_eval
+    mock_pipeline_modules["fetch"].side_effect = mock_fetch
     mock_pipeline_modules["judge"].side_effect = mock_judge
 
     async def make_request(query):
@@ -102,11 +110,9 @@ async def test_concurrent_isolation(mock_pipeline_modules):
             return resp.json()["answer"]
 
     queries = [f"query_{i}" for i in range(5)]
-    tasks = [make_request(q) for q in queries]
-    
-    # We must use proper asyncio event loop context since lifespan is ASGI context based
-    # However since we mocked out the lifespan harvester loop anyway, directly calling app endpoint is safe.
-    results = await asyncio.gather(*tasks)
-    
-    for q in queries:
-        assert f"Ans for {q}" in results
+    results = await asyncio.gather(*[make_request(q) for q in queries])
+
+    for i, q in enumerate(queries):
+        expected = f"Ans for http://mock_{q}.com"
+        assert expected in results[i], \
+            f"Query '{q}': expected '{expected}' in answer, got: '{results[i][:200]}'"

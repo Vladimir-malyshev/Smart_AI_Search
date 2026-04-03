@@ -12,7 +12,7 @@ from app.modules import harvester, redis_manager
 async def mock_redis(monkeypatch):
     """Replace real redis client with fakeredis one."""
     fake_client = fake_aioredis.FakeRedis(decode_responses=True)
-    monkeypatch.setattr(redis_manager, "redis_client", fake_client)
+    monkeypatch.setattr(redis_manager, "_redis_client", fake_client)
     
     # Reset in-memory fallback state if any
     redis_manager._fallback_scores.clear()
@@ -28,27 +28,32 @@ def mock_instances_data():
         "instances": {
             "http://node-a.tor": {
                 "network_type": "tor",
-                "monitoring": {"stats": {"uptime": 99}, "http": {"grade": "A"}}
+                "uptime": {"uptimeWeek": 99},
+                "http": {"grade": "A"}
             },
             "http://node-b.poor": {
                 "network_type": "normal",
-                "monitoring": {"stats": {"uptime": 85}, "http": {"grade": "C"}}
+                "uptime": {"uptimeWeek": 85},
+                "http": {"grade": "C"}
             },
             "http://node-c.good": {
                 "network_type": "normal",
-                "monitoring": {"stats": {"uptime": 99}, "http": {"grade": "A"}}
+                "uptime": {"uptimeWeek": 99},
+                "http": {"grade": "A"}
             },
             "http://node-d.slow": {
                 "network_type": "normal",
-                "monitoring": {"stats": {"uptime": 95}, "http": {"grade": "B+"}}
+                "uptime": {"uptimeWeek": 95},
+                "http": {"grade": "B+"}
             },
             "http://node-e.existing": {
                 "network_type": "normal",
-                "monitoring": {"stats": {"uptime": 98}, "http": {"grade": "A+"}}
+                "uptime": {"uptimeWeek": 98},
+                "http": {"grade": "A+"}
             },
             "http://node-f.missing-keys": {
                 "network_type": "normal"
-                # missing monitoring
+                # missing uptime and http
             }
         }
     }
@@ -65,8 +70,8 @@ async def test_harvester_filtering_and_sync(mock_redis, mock_instances_data):
         m.get(harvester.INSTANCES_JSON_URL, status=200, payload=mock_instances_data)
         
         # Mock health-checks
-        # Only node-c will succeed
-        m.get("http://node-c.good/?q=test&format=json", status=200, payload={"results": []})
+        # health-check query is now q=weather
+        m.get("http://node-c.good/?q=weather&format=json", status=200, payload={"results": []})
         # node-a and node-b are filtered out before healthcheck, so no need to mock them for success
         
         # Run cycle
@@ -92,8 +97,9 @@ async def test_harvester_timeout(mock_redis, mock_instances_data):
         
         # node-d will timeout (simulated by exception or delay?)
         # aioresponses handles timeout as an error if we raise it
-        m.get("http://node-d.slow/?q=test&format=json", exception=asyncio.TimeoutError())
-        m.get("http://node-c.good/?q=test&format=json", status=200, payload={})
+        # health-check query is now q=weather
+        m.get("http://node-d.slow/?q=weather&format=json", exception=asyncio.TimeoutError())
+        m.get("http://node-c.good/?q=weather&format=json", status=200, payload={})
         
         await harvester.run_harvest_cycle()
         
@@ -115,8 +121,8 @@ async def test_harvester_idempotency(mock_redis, mock_instances_data):
     with aioresponses() as m:
         m.get(harvester.INSTANCES_JSON_URL, status=200, payload=mock_instances_data)
         
-        # Health-check success for E
-        m.get(f"{node_e_url}/?q=test&format=json", status=200, payload={})
+        # Health-check success for E (using q=weather)
+        m.get(f"{node_e_url.rstrip('/')}/?q=weather&format=json", status=200, payload={})
         
         # Run twice
         await harvester.run_harvest_cycle()

@@ -22,8 +22,8 @@ async def test_successful_fetch():
 async def test_truncation():
     """Test that content is truncated according to JINA_MAX_CHARS."""
     url = "https://long-article.com"
-    # Create content larger than default 20,000 chars
-    long_content = "X" * 25000
+    # Create content larger than default 20,000 chars with valid word ratio
+    long_content = "Word " * 5000
     
     with aioresponses() as m:
         m.get(f"https://r.jina.ai/{url}", status=200, body=long_content)
@@ -34,7 +34,7 @@ async def test_truncation():
         content = results[url]
         assert len(content) <= jina_reader.JINA_MAX_CHARS + len(jina_reader.TRUNCATION_MARKER)
         assert content.endswith(jina_reader.TRUNCATION_MARKER)
-        assert content.startswith("X" * jina_reader.JINA_MAX_CHARS)
+        assert content.startswith("Word")
 
 @pytest.mark.asyncio
 async def test_blocked_content():

@@ -1,0 +1,54 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.0.2, pluggy-1.6.0 -- D:\VSCODE\Projects\Smart_AI_Search\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\VSCODE\Projects\Smart_AI_Search
+configfile: pytest.ini
+plugins: anyio-4.13.0, asyncio-1.3.0, mock-3.15.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 27 items
+
+tests/test_ai_judge.py::test_scenario_success PASSED                     [  3%]
+tests/test_ai_judge.py::test_scenario_incomplete PASSED                  [  7%]
+tests/test_ai_judge.py::test_scenario_last_chance_override PASSED        [ 11%]
+tests/test_ai_judge.py::test_invalid_json_fallback PASSED                [ 14%]
+tests/test_execution_engine.py::test_live_search_provider SKIPPED (P...) [ 18%]
+tests/test_execution_engine.py::test_execute_all_deduplication PASSED    [ 22%]
+tests/test_execution_engine.py::test_searxng_redis_logic SKIPPED (Le...) [ 25%]
+tests/test_harvester.py::test_harvester_filtering_and_sync FAILED        [ 29%]
+tests/test_harvester.py::test_harvester_timeout FAILED                   [ 33%]
+tests/test_harvester.py::test_harvester_idempotency PASSED               [ 37%]
+tests/test_jina_reader.py::test_successful_fetch PASSED                  [ 40%]
+tests/test_jina_reader.py::test_truncation PASSED                        [ 44%]
+tests/test_jina_reader.py::test_blocked_content PASSED                   [ 48%]
+tests/test_jina_reader.py::test_http_error_handling PASSED               [ 51%]
+tests/test_jina_reader.py::test_timeout_handling PASSED                  [ 55%]
+tests/test_main.py::test_successful_end_to_end PASSED                    [ 59%]
+tests/test_main.py::test_global_timeout_graceful_return PASSED           [ 62%]
+tests/test_main.py::test_deep_research_iterations PASSED                 [ 66%]
+tests/test_main.py::test_concurrent_isolation PASSED                     [ 70%]
+tests/test_redis_manager.py::test_atomic_parallel_add_score PASSED       [ 74%]
+tests/test_redis_manager.py::test_quarantine_lifecycle PASSED            [ 77%]
+tests/test_redis_manager.py::test_ranking PASSED                         [ 81%]
+tests/test_redis_manager.py::test_fallback_mechanism PASSED              [ 85%]
+tests/test_snippet_evaluator.py::test_successful_evaluation PASSED       [ 88%]
+tests/test_snippet_evaluator.py::test_anti_hallucination PASSED          [ 92%]
+tests/test_snippet_evaluator.py::test_no_relevant_snippets PASSED        [ 96%]
+tests/test_snippet_evaluator.py::test_invalid_llm_response PASSED        [100%]
+
+================================== FAILURES ===================================
+______________________ test_harvester_filtering_and_sync ______________________
+tests\test_harvester.py:83: in test_harvester_filtering_and_sync
+    assert score == 100.0
+E   assert None == 100.0
+------------------------------ Captured log call ------------------------------
+CRITICAL app.modules.harvester:harvester.py:137 CRITICAL: эш юфэр эюфр эх яЁю°ыр health-check. ┬ючьюцхэ IP-срэ їюёЄшэур шыш эхфюёЄєяэюёЄ№ ёхЄш.
+___________________________ test_harvester_timeout ____________________________
+tests\test_harvester.py:106: in test_harvester_timeout
+    assert await mock_redis.zscore(redis_manager.ZSET_KEY, "http://node-c.good") == 100.0
+E   assert None == 100.0
+------------------------------ Captured log call ------------------------------
+CRITICAL app.modules.harvester:harvester.py:137 CRITICAL: эш юфэр эюфр эх яЁю°ыр health-check. ┬ючьюцхэ IP-срэ їюёЄшэур шыш эхфюёЄєяэюёЄ№ ёхЄш.
+=========================== short test summary info ===========================
+FAILED tests/test_harvester.py::test_harvester_filtering_and_sync - assert No...
+FAILED tests/test_harvester.py::test_harvester_timeout - assert None == 100.0
+================== 2 failed, 23 passed, 2 skipped in 29.13s ===================

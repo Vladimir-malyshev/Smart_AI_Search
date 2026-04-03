@@ -8,20 +8,12 @@ from redis.exceptions import ConnectionError, TimeoutError
 
 logger = logging.getLogger(__name__)
 
-# Strict requirement: Load from environment variable without default
-REDIS_URL = os.environ["REDIS_URL"]
-
-# Connection Pool
-pool = aioredis.ConnectionPool.from_url(
-    REDIS_URL,
-    max_connections=20,
-    decode_responses=True
-)
-redis_client = aioredis.Redis(connection_pool=pool)
-
 ZSET_KEY = "searx:nodes:score"
 QUARANTINE_PREFIX = "searx:quarantine:"
 QUARANTINE_TTL = 3600
+
+# Connection
+_redis_client = None
 
 # In-memory fallback states
 _fallback_scores: dict[str, float] = {}
@@ -30,36 +22,71 @@ _redis_available: bool = True
 _sync_lock = asyncio.Lock()
 
 
+def get_redis_client():
+    global _redis_client, _redis_available
+    if _redis_client is None and _redis_available:
+        redis_url = os.environ.get("REDIS_URL")
+        if not redis_url:
+            logger.warning("REDIS_URL not set in environment. Falling back to in-memory state.")
+            _redis_available = False
+            return None
+        try:
+            pool = aioredis.ConnectionPool.from_url(
+                redis_url,
+                max_connections=20,
+                decode_responses=True
+            )
+            _redis_client = aioredis.Redis(connection_pool=pool)
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis client: {e}")
+            _redis_available = False
+            return None
+    return _redis_client
+
+
+async def _set_redis_unavailable(e: Exception):
+    """Safely mark Redis as unavailable within a lock."""
+    global _redis_available
+    async with _sync_lock:
+        if _redis_available:
+            logger.warning(f"Redis недоступен, используется fallback: {e}")
+            _redis_available = False
+
+
 async def _check_and_sync_fallback():
     """Check if Redis is back up and sync fallback data if needed."""
     global _redis_available
     if _redis_available:
         return
 
-    # If it was unavailable, we try to ping it
-    try:
-        await redis_client.ping()
-    except (ConnectionError, TimeoutError):
-        return  # Still down
+    client = get_redis_client()
+    if client is None:
+        return
 
-    # Looks like it's back, let's sync
+    # Выполняем ping и весь sync внутри лока, чтобы исключить гонку состояний.
+    # Двойная проверка _redis_available внутри лока защищает от параллельных попыток.
     async with _sync_lock:
-        if _redis_available:  # Double check
+        if _redis_available:  # Другая корутина уже восстановила соединение
             return
-            
+
         try:
-            async with redis_client.pipeline() as pipe:
+            await client.ping()
+        except (ConnectionError, TimeoutError):
+            return  # Redis всё ещё недоступен
+
+        try:
+            async with client.pipeline() as pipe:
                 if _fallback_scores:
                     pipe.zadd(ZSET_KEY, _fallback_scores)
-                
+
                 current_time = time.time()
                 for url, exp_time in _fallback_quarantine.items():
                     if exp_time > current_time:
                         ttl = int(exp_time - current_time)
                         pipe.set(f"{QUARANTINE_PREFIX}{url}", "1", ex=ttl)
-                
+
                 await pipe.execute()
-                
+
             _fallback_scores.clear()
             _fallback_quarantine.clear()
             _redis_available = True
@@ -68,26 +95,20 @@ async def _check_and_sync_fallback():
             logger.warning("Failed to sync fallback data to Redis.")
 
 
-def _handle_redis_error(e: Exception):
-    global _redis_available
-    if _redis_available:
-        logger.warning(f"Redis недоступен, используется fallback: {e}")
-        _redis_available = False
-
-
 async def add_score(url: str, delta: float) -> float:
     await _check_and_sync_fallback()
+    client = get_redis_client()
     
-    if _redis_available:
+    if _redis_available and client:
         try:
-            async with redis_client.pipeline() as pipe:
+            async with client.pipeline() as pipe:
                 # Базовый рейтинг новой ноды = 100. NX запишет 100, только если ключа еще нет.
                 pipe.zadd(ZSET_KEY, {url: 100.0}, nx=True)
                 pipe.zincrby(ZSET_KEY, delta, url)
                 results = await pipe.execute()
             return float(results[1])
         except (ConnectionError, TimeoutError) as e:
-            _handle_redis_error(e)
+            await _set_redis_unavailable(e)
             
     # Fallback path
     current = _fallback_scores.get(url, 100.0)
@@ -114,13 +135,14 @@ return tonumber(new_score)
 
 async def reduce_score(url: str, delta: float) -> float:
     await _check_and_sync_fallback()
+    client = get_redis_client()
     
-    if _redis_available:
+    if _redis_available and client:
         try:
-            new_score = await redis_client.eval(_REDUCE_SCORE_LUA, 1, ZSET_KEY, url, delta)
+            new_score = await client.eval(_REDUCE_SCORE_LUA, 1, ZSET_KEY, url, delta)
             return float(new_score)
         except (ConnectionError, TimeoutError) as e:
-            _handle_redis_error(e)
+            await _set_redis_unavailable(e)
             
     # Fallback path
     current = _fallback_scores.get(url, 100.0)
@@ -131,16 +153,17 @@ async def reduce_score(url: str, delta: float) -> float:
 
 async def quarantine(url: str, ttl: int = QUARANTINE_TTL) -> None:
     await _check_and_sync_fallback()
+    client = get_redis_client()
     
-    if _redis_available:
+    if _redis_available and client:
         try:
-            async with redis_client.pipeline() as pipe:
+            async with client.pipeline() as pipe:
                 pipe.zrem(ZSET_KEY, url)
                 pipe.set(f"{QUARANTINE_PREFIX}{url}", "1", ex=ttl)
                 await pipe.execute()
             return
         except (ConnectionError, TimeoutError) as e:
-            _handle_redis_error(e)
+            await _set_redis_unavailable(e)
             
     # Fallback path
     _fallback_scores.pop(url, None)
@@ -149,13 +172,14 @@ async def quarantine(url: str, ttl: int = QUARANTINE_TTL) -> None:
 
 async def is_quarantined(url: str) -> bool:
     await _check_and_sync_fallback()
+    client = get_redis_client()
     
-    if _redis_available:
+    if _redis_available and client:
         try:
-            exists = await redis_client.exists(f"{QUARANTINE_PREFIX}{url}")
+            exists = await client.exists(f"{QUARANTINE_PREFIX}{url}")
             return exists > 0
         except (ConnectionError, TimeoutError) as e:
-            _handle_redis_error(e)
+            await _set_redis_unavailable(e)
             
     # Fallback path
     exp_time = _fallback_quarantine.get(url)
@@ -169,10 +193,11 @@ async def is_quarantined(url: str) -> bool:
 
 async def get_top_nodes(limit: int = 10) -> List[str]:
     await _check_and_sync_fallback()
+    client = get_redis_client()
     
-    if _redis_available:
+    if _redis_available and client:
         try:
-            nodes = await redis_client.zrevrange(ZSET_KEY, 0, (limit * 2) - 1)
+            nodes = await client.zrevrange(ZSET_KEY, 0, (limit * 2) - 1)
             valid_nodes = []
             for url in nodes:
                 if not await is_quarantined(url):
@@ -181,7 +206,7 @@ async def get_top_nodes(limit: int = 10) -> List[str]:
                         break
             return valid_nodes
         except (ConnectionError, TimeoutError) as e:
-            _handle_redis_error(e)
+            await _set_redis_unavailable(e)
             
     # Fallback path
     valid_nodes = []
@@ -203,3 +228,4 @@ async def get_top_nodes(limit: int = 10) -> List[str]:
             if len(valid_nodes) == limit:
                 break
     return valid_nodes
+
