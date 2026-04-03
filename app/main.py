@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Config
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", 3))
-GLOBAL_TIMEOUT_SEC = 200.0
+GLOBAL_TIMEOUT_SEC = float(os.environ.get("GLOBAL_TIMEOUT_SEC", "200.0"))
 
 class ResearchRequest(BaseModel):
     query: str
@@ -61,6 +61,7 @@ async def run_research_pipeline(query: str, goal: str) -> dict:
     # Critical: Strict Isolation
     accumulated_context: dict[str, str] = {}
     current_queries: Optional[List[str]] = None
+    all_executed_queries: List[str] = []
     
     for iteration in range(1, MAX_ITERATIONS + 1):
         logger.info(f"Research Pipeline Iteration {iteration}/{MAX_ITERATIONS} for query: {query[:30]}")
@@ -69,6 +70,8 @@ async def run_research_pipeline(query: str, goal: str) -> dict:
         if current_queries is None:
             current_queries = [query]
             logger.info(f"Iteration 1: Using exact user query: {current_queries}")
+            
+        all_executed_queries.extend(current_queries)
             
         # 2. Execute parallel search
         snippets = await execute_all(current_queries)
@@ -93,7 +96,8 @@ async def run_research_pipeline(query: str, goal: str) -> dict:
             goal=goal,
             context=accumulated_context,
             current_iteration=iteration,
-            max_iterations=MAX_ITERATIONS
+            max_iterations=MAX_ITERATIONS,
+            executed_queries=all_executed_queries
         )
         judge_result = await judge(judge_input)
         

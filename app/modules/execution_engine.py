@@ -3,6 +3,7 @@ import time
 import asyncio
 import logging
 import aiohttp
+import urllib.parse
 from dataclasses import dataclass
 from typing import List
 
@@ -17,20 +18,43 @@ class SearchSnippet:
 async def _search_jina(query: str) -> List[SearchSnippet]:
     """Search using Jina AI provider."""
     start_time = time.monotonic()
+    
     logger.info(f"Searching Jina for: {query}")
-    url = f"https://s.jina.ai/{query}"
+    
+    encoded_query = urllib.parse.quote(query, safe="")
+    url = f"https://s.jina.ai/{encoded_query}"
+    
     jina_api_key = os.environ.get("JINA_API_KEY", "")
+    jina_search_engine = os.environ.get("JINA_SEARCH_ENGINE", "google")
     
     headers = {
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "X-Retain-Images": "none",
+        "X-Retain-Links": "none",
+        "X-Engine": jina_search_engine
     }
     if jina_api_key:
         headers["Authorization"] = f"Bearer {jina_api_key}"
         
+    params = {}
+    params["num"] = int(os.environ.get("JINA_SEARCH_NUM_RESULTS", "5"))
+    
+    locale = os.environ.get("JINA_SEARCH_LOCALE", "")
+    if locale:
+        params["hl"] = locale
+        
+    country = os.environ.get("JINA_SEARCH_COUNTRY", "")
+    if country:
+        params["gl"] = country
+        
+    nfpr = os.environ.get("JINA_SEARCH_NO_FIX_PHRASE", "true").lower() == "true"
+    if nfpr:
+        params["nfpr"] = "true"
+        
     snippets = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
+            async with session.get(url, headers=headers, params=params) as response:
                 if response.status != 200:
                     logger.warning(f"Jina API returned status {response.status} for query '{query}'")
                     return snippets
@@ -97,8 +121,23 @@ async def execute_all(queries: List[str]) -> List[SearchSnippet]:
     unique_snippets = []
     seen_urls = set()
     
+    exclude_domains_str = os.environ.get("JINA_SEARCH_EXCLUDE_DOMAINS", "twitter.com,x.com,facebook.com,instagram.com,t.me,vk.com")
+    exclude_domains = [d.strip().lower() for d in exclude_domains_str.split(",") if d.strip()]
+    exclude_exts = [".pdf", ".doc", ".docx", ".xls", ".ppt"]
+    
     for snippet in flat_results:
         url_norm = snippet.url.strip().lower()
+        
+        # Check extensions
+        if any(url_norm.endswith(ext) for ext in exclude_exts):
+            logger.debug(f"Jina Search: excluded {snippet.url} (document extension)")
+            continue
+            
+        # Check domains
+        if any(domain in url_norm for domain in exclude_domains):
+            logger.debug(f"Jina Search: excluded {snippet.url} (domain filter)")
+            continue
+
         if url_norm not in seen_urls:
             seen_urls.add(url_norm)
             unique_snippets.append(snippet)

@@ -27,6 +27,7 @@ class JudgeInput:
     context: Dict[str, Optional[str]]
     current_iteration: int
     max_iterations: int
+    executed_queries: List[str]
 
 @dataclass
 class JudgeOutput:
@@ -132,7 +133,7 @@ async def judge(inp: JudgeInput) -> JudgeOutput:
         else:
             truncated_context[url] = text
 
-    user_message = f"Запрос: {inp.original_query}\nЦель: {inp.goal}\n\nСобранные материалы:\n{format_context(truncated_context)}"
+    user_message = f"Запрос: {inp.original_query}\nЦель: {inp.goal}\nУже выполненные поисковые запросы (НЕ ПРЕДЛАГАЙ ИХ СНОВА): {inp.executed_queries}\n\nСобранные материалы:\n{format_context(truncated_context)}"
     
     # Retry logic for 429 RESOURCE_EXHAUSTED with exponential backoff
     max_retries = int(os.environ.get("LLM_MAX_RETRIES", 3))

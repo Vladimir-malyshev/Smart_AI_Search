@@ -11,6 +11,11 @@ JINA_API_KEY = os.environ.get("JINA_API_KEY")
 JINA_MAX_CHARS = int(os.environ.get("JINA_MAX_CHARS", 20000))
 JINA_TIMEOUT_SEC = float(os.environ.get("JINA_TIMEOUT_SEC", 15.0))
 JINA_CONCURRENCY = int(os.environ.get("JINA_CONCURRENCY", 4))
+JINA_REMOVE_OVERLAY = os.environ.get("JINA_REMOVE_OVERLAY", "true").lower() == "true"
+JINA_TOKEN_BUDGET = os.environ.get("JINA_TOKEN_BUDGET", "")
+JINA_LOCALE = os.environ.get("JINA_LOCALE", "")
+JINA_RESPOND_TIMING = os.environ.get("JINA_RESPOND_TIMING", "network-idle")
+JINA_REMOVE_SELECTOR = os.environ.get("JINA_REMOVE_SELECTOR", "header, footer, nav, aside, .sidebar, .comments, #comments, .advertisement, .nav, .menu")
 
 TRUNCATION_MARKER = "\n\n[...ТЕКСТ ОБРЕЗАН — достигнут лимит контекста...]"
 
@@ -22,7 +27,12 @@ def truncate_content(text: str, max_chars: int) -> str:
 
 def is_blocked_content(text: str) -> bool:
     """Heuristic check for paywalls, captchas, or failed extraction."""
-    if not text or len(text) < 100:
+    if not text or len(text) < 200:
+        return True
+        
+    # Check length-to-word ratio (if average word is > 15 chars, it's likely binary noise/gibberish)
+    words = text.split()
+    if words and (len(text) / len(words)) > 15:
         return True
     
     blocked_phrases = [
@@ -32,7 +42,11 @@ def is_blocked_content(text: str) -> bool:
         "Access denied",
         "Enable JavaScript", 
         "403 Forbidden",
-        "Cloudflare"
+        "Cloudflare",
+        "This content is for subscribers",
+        "Please enable cookies",
+        "verify you are human",
+        "429 Too Many Requests"
     ]
     
     # Check lowercase to be safe
@@ -43,8 +57,23 @@ async def fetch_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:
     """Fetches a single URL via Jina Reader API."""
     logger.info(f"Jina: Extracting content from {url}...")
     headers = {
-        "Accept": "text/markdown"
+        "Accept": "text/markdown",
+        "X-Retain-Images": "none",
+        "X-Retain-Links": "none",
+        "X-Md-Heading-Style": "atx",
+        "X-Md-Link-Style": "discarded"
     }
+    
+    if JINA_REMOVE_OVERLAY:
+        headers["X-Remove-Overlay"] = "true"
+    if JINA_REMOVE_SELECTOR:
+        headers["X-Remove-Selector"] = JINA_REMOVE_SELECTOR
+    if JINA_TOKEN_BUDGET:
+        headers["X-Token-Budget"] = JINA_TOKEN_BUDGET
+    if JINA_LOCALE:
+        headers["X-Locale"] = JINA_LOCALE
+    if JINA_RESPOND_TIMING:
+        headers["X-Respond-Timing"] = JINA_RESPOND_TIMING
     if JINA_API_KEY:
         headers["Authorization"] = f"Bearer {JINA_API_KEY}"
         
@@ -63,7 +92,9 @@ async def fetch_url(session: aiohttp.ClientSession, url: str) -> Optional[str]:
                 logger.warning(f"Jina: Content blocked or low quality for {url}")
                 return None
             
-            return truncate_content(content, JINA_MAX_CHARS)
+            final_content = truncate_content(content, JINA_MAX_CHARS)
+            logger.info(f"Jina Reader: {url} → {len(final_content)} chars extracted (raw: {len(content)})")
+            return final_content
             
     except asyncio.TimeoutError:
         logger.warning(f"Jina: Timeout for {url} after {JINA_TIMEOUT_SEC}s")
